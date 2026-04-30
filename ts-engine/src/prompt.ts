@@ -37,7 +37,7 @@ export class PromptBuilder {
   private engine = new Liquid(LIQUID_OPTS);
   private parsed: ReturnType<Liquid["parse"]>;
 
-  constructor(private template: string) {
+  constructor(template: string) {
     this.parsed = this.engine.parse(template);
   }
 
