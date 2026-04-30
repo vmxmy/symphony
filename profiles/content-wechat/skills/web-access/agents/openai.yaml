@@ -1,0 +1,4 @@
+interface:
+  display_name: "Web Access"
+  short_description: "按场景选择内置 web、curl 或 Chrome CDP 完成联网与浏览器任务"
+  default_prompt: "Use $web-access to search the public web, read dynamic pages, or operate websites through the local Chrome CDP proxy when login or real browser interaction is required."

@@ -1,0 +1,69 @@
+# Symphony profile: content-wechat
+# WeChat 公众号内容生产管线 (Tier 2 standard editorial pipeline)
+
+name: content-wechat
+version: 1.0.0
+description: WeChat 公众号 1500-2200 字 科普/速报/评论/教程 自动生产管线
+maintainer: blueyang@gmail.com
+
+schema_version: 1
+
+# Symphony instance parameters (engine binary auto-detected by launcher)
+symphony:
+  port: 4001
+  bypass_guardrails: true
+  workspace_root: ~/symphony-content-workspaces
+  archive_root:   ~/symphony-content-archive
+
+# Linear automation (launcher ensures these exist on start)
+linear:
+  team_id: c91047bb-0579-4b53-b1eb-ad8fba454e16
+  project_slug: ziikoo-839b53546018
+  states:
+    active:    [Todo, Researching, Outlining, Drafting, Self-Editing, Rendering, Publishing]
+    pause:     [Backlog, "Draft Review", "Final Review"]
+    terminal:  [Done, Cancelled, Canceled, Closed]
+  ensure_states:
+    - {name: Researching,  type: started, color: "#94a3b8"}
+    - {name: Outlining,    type: started, color: "#7dd3fc"}
+    - {name: Drafting,     type: started, color: "#5e6ad2"}
+    - {name: "Draft Review", type: started, color: "#f2c94c"}
+    - {name: "Self-Editing", type: started, color: "#fbbf24"}
+    - {name: Rendering,    type: started, color: "#bb87fc"}
+    - {name: "Final Review", type: started, color: "#f2994a"}
+    - {name: Publishing,   type: started, color: "#26b5ce"}
+  ensure_labels:
+    - {name: 科普,   color: "#26b5ce"}
+    - {name: 速报,   color: "#eb5757"}
+    - {name: 评论,   color: "#f2994a"}
+    - {name: 教程,   color: "#5e6ad2"}
+
+# Pre-flight checks (launcher refuses to start if any fail)
+preflight:
+  env_required:
+    - LINEAR_API_KEY
+    - WECHAT_APP_ID
+    - WECHAT_APP_SECRET
+  skills_required:
+    - baoyu-post-to-wechat
+    - baoyu-markdown-to-html
+    - baoyu-article-illustrator
+    - baoyu-cover-image
+    - ljg-writes
+    - ljg-learn
+    - tavily-research
+    - last30days
+    - mptext-api
+    - linear
+  ssh_workers:
+    - host: dev@74.48.189.45
+      purpose: WeChat publishing fixed-IP
+      check_cmd: 'test -x ~/.bun/bin/bun && test -f ~/.codex/skills/baoyu-post-to-wechat/scripts/wechat-api.ts && test -f ~/.baoyu-skills/.env'
+      sync_paths:
+        - {local: skills/baoyu-post-to-wechat/, remote: ~/.codex/skills/baoyu-post-to-wechat/}
+        - {local: env, remote: ~/.baoyu-skills/.env}
+
+notes: |
+  Publishing 阶段通过 SSH 到固定 IP VPS (74.48.189.45) 执行，绕开本地动态 IP
+  无法满足 WeChat 公众号 IP 白名单的限制。VPS 上需先安装 bun + 同步 skill +
+  同步 env，launcher 启动时会自动检查。

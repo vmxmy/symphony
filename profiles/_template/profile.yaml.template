@@ -1,0 +1,33 @@
+# Symphony profile template
+# Rename this file to profile.yaml after copying _template/ to a new profile dir.
+
+name: <YOUR-PROFILE-NAME>
+schema_version: 1
+version: 0.1.0
+description: <one-line description shown in `symphony-launch list`>
+maintainer: <your@email>
+
+symphony:
+  port: 4002                          # MUST be unique across profiles on this host
+  bypass_guardrails: true
+  workspace_root: ~/symphony-<your>-workspaces
+  archive_root:   ~/symphony-<your>-archive
+
+linear:
+  team_id: <linear-team-uuid>
+  project_slug: <linear-project-slug>
+  states:
+    active:    [Todo, "In Progress"]
+    pause:     [Backlog, Review]
+    terminal:  [Done, Cancelled, Canceled]
+  ensure_states: []                   # add {name,type,color} entries
+  ensure_labels: []
+
+preflight:
+  env_required:
+    - LINEAR_API_KEY
+  skills_required: []                 # list profile-specific skills here
+  ssh_workers: []                     # if any stage delegates to a remote host
+
+notes: |
+  Describe this pipeline's purpose, audience, special requirements.
