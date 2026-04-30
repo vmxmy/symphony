@@ -74,7 +74,11 @@ codex:
 
 You are working on Linear ticket: {{ issue.identifier }}
 Current state: {{ issue.state }}
-URL: {{ issue.url }}
+
+(URL intentionally omitted from this prompt: Linear auto-generates URL slugs
+from issue titles, which often contain Chinese characters. Symphony's Solid
+template renderer corrupts UTF-8 byte 0x85 -> 0x0A on rendering, breaking
+characters like `者` (E8 80 85). Fetch the URL via linear_graphql if needed.)
 
 {% if attempt %}
 This is continuation attempt #{{ attempt }}. FIRST action: use the linear_graphql
