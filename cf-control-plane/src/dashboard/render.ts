@@ -32,10 +32,24 @@ type ProfileView = {
   agent_error?: string;
 };
 
+type RunView = {
+  id: string;
+  issue_id: string;
+  issue_identifier?: string | null;
+  attempt: number;
+  status: string;
+  adapter_kind: string;
+  started_at: string;
+  finished_at?: string | null;
+  error?: string | null;
+  token_usage_json?: string | null;
+};
+
 type DashboardState = {
   generated_at: string;
   tenants: TenantView[];
   profiles: ProfileView[];
+  runs?: RunView[];
 };
 
 const ESCAPE_MAP: Record<string, string> = {
@@ -142,11 +156,57 @@ const DASHBOARD_CSS = `
   .status-suspended { color: #b22; font-weight: 600; }
   .status-draining { color: #aa5500; font-weight: 600; }
   .status-archived { color: #888; }
+  .status-running { color: #0a7; font-weight: 600; }
+  .status-completed { color: #279847; font-weight: 600; }
+  .status-failed { color: #b22; font-weight: 600; }
+  .status-cancelled { color: #888; }
+  .status-retry_wait { color: #b27000; }
   footer { margin-top: 2rem; color: #888; font-size: 0.8rem; border-top: 1px solid #eee; padding-top: 0.5rem; display: flex; justify-content: space-between; }
   footer a { color: #555; }
 `;
 
+function runsTable(runs: RunView[]): string {
+  if (runs.length === 0) return `<p class="empty">No runs yet. POST /api/v1/projects/&lt;tenant&gt;/&lt;slug&gt;/issues/&lt;identifier&gt;/actions/mock-run to create one.</p>`;
+  const rows = runs
+    .map((r) => {
+      const tu = safeParse<{ totalTokens?: number }>(r.token_usage_json ?? null) ?? {};
+      const dur =
+        r.finished_at && r.started_at
+          ? Math.max(0, new Date(r.finished_at).getTime() - new Date(r.started_at).getTime())
+          : null;
+      return `
+        <tr>
+          <td><code>${escape(r.id.slice(0, 8))}…</code></td>
+          <td><code>${escape(r.issue_identifier ?? r.issue_id)}</code></td>
+          <td>#${escape(r.attempt)}</td>
+          <td><span class="status-${escape(r.status)}">${escape(r.status)}</span></td>
+          <td>${escape(r.adapter_kind)}</td>
+          <td>${dur !== null ? escape(dur) + " ms" : `<span class="muted">-</span>`}</td>
+          <td>${tu.totalTokens !== undefined ? escape(tu.totalTokens) : `<span class="muted">-</span>`}</td>
+          <td><time>${escape(r.started_at)}</time></td>
+        </tr>`;
+    })
+    .join("");
+  return `
+    <table>
+      <thead>
+        <tr><th>id</th><th>issue</th><th>attempt</th><th>status</th><th>adapter</th><th>duration</th><th>tokens</th><th>started</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function safeParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 export function renderDashboard(state: DashboardState): string {
+  const runs = state.runs ?? [];
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -169,6 +229,11 @@ export function renderDashboard(state: DashboardState): string {
   <section>
     <h2>Profiles (${state.profiles.length})</h2>
     ${profilesTable(state.profiles)}
+  </section>
+
+  <section>
+    <h2>Recent Runs (${runs.length})</h2>
+    ${runsTable(runs)}
   </section>
 
   <footer>
