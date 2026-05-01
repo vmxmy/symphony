@@ -24,17 +24,38 @@ const WORKSPACE_ROOT = process.env.WORKSPACE ?? "/data/workspace";
 
 let authReady = false;
 
+function readSecretEnv(rawName, b64Name) {
+  const rawValue = process.env[rawName];
+  if (rawValue) return rawValue;
+
+  const encodedValue = process.env[b64Name];
+  if (!encodedValue) return "";
+
+  try {
+    return Buffer.from(encodedValue, "base64").toString("utf8");
+  } catch (e) {
+    console.error(`[bridge] failed to decode ${b64Name}: ${e.message}`);
+    return "";
+  }
+}
+
 function materializeAuth() {
-  const authJson = process.env.CODEX_AUTH_JSON;
+  const authJson = readSecretEnv("CODEX_AUTH_JSON", "CODEX_AUTH_JSON_B64");
   if (!authJson) {
     console.error(
-      "[bridge] CODEX_AUTH_JSON env var not set; codex will likely fail to authenticate",
+      "[bridge] CODEX_AUTH_JSON(_B64) env var not set; codex will likely fail to authenticate",
     );
     return;
   }
   mkdirSync(CODEX_HOME, { recursive: true, mode: 0o700 });
   writeFileSync(`${CODEX_HOME}/auth.json`, authJson, { mode: 0o600 });
   console.error("[bridge] codex auth materialized");
+
+  const configToml = readSecretEnv("CODEX_CONFIG_TOML", "CODEX_CONFIG_TOML_B64");
+  if (configToml) {
+    writeFileSync(`${CODEX_HOME}/config.toml`, configToml, { mode: 0o600 });
+    console.error("[bridge] codex config materialized");
+  }
   authReady = true;
 }
 
@@ -180,7 +201,7 @@ async function runTurn(req, res) {
       cwd,
       title: "spike turn",
       approvalPolicy: "never",
-      sandboxPolicy: "danger-full-access",
+      sandbox_policy: "dangerFullAccess",
     });
 
     // Wait for turn/* terminal notification, or timeout.

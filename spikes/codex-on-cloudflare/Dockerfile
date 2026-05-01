@@ -3,6 +3,13 @@
 
 FROM node:20-slim
 
+# Codex's Rust HTTP stack needs a native CA trust store in this minimal image.
+# bubblewrap removes the app-server sandbox warning and matches Codex's Linux
+# sandbox prerequisites more closely, even though this spike runs danger-full.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates bubblewrap \
+    && rm -rf /var/lib/apt/lists/*
+
 # codex CLI is distributed as @openai/codex on npm; pinned to match the
 # version validated by the local engine on 2026-05-01.
 RUN npm install -g @openai/codex@0.128.0 \

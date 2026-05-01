@@ -21,8 +21,15 @@ max_instances = 3
 
 # Secrets to provide (do NOT commit):
 #   CODEX_AUTH_JSON  : contents of ~/.codex/auth.json from an authenticated host.
+#   CODEX_AUTH_JSON_B64 / CODEX_CONFIG_TOML_B64 are accepted by the bridge for
+#   multiline-safe VPS/Container deployments.
+#   CODEX_CONFIG_TOML: optional filtered ~/.codex/config.toml with local providers.
+#   CRS_OAI_KEY / KIMI_API_KEY: optional third-party provider keys referenced by config.
 #   OPENAI_API_KEY   : optional, if codex auth uses a raw API key path.
 #
 # Set via:
 #   wrangler secret put CODEX_AUTH_JSON
+#   wrangler secret put CODEX_CONFIG_TOML
+#   wrangler secret put CRS_OAI_KEY
+#   wrangler secret put KIMI_API_KEY
 #   wrangler secret put OPENAI_API_KEY
