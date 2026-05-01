@@ -29,6 +29,30 @@ export class AgentRunner {
     },
   ) {}
 
+  /**
+   * Defensive token-usage extractor. Codex emits usage data in multiple
+   * shapes (direct camelCase, snake_case, nested .usage / .tokens, etc).
+   * No-op if all extracted numbers are zero.
+   */
+  private recordUsage(
+    issueId: string,
+    usage: Record<string, unknown>,
+    accum: TokenUsage,
+  ): void {
+    const u: Record<string, unknown> =
+      (usage.usage as Record<string, unknown>) ??
+      (usage.tokens as Record<string, unknown>) ??
+      usage;
+    const total = num(u.totalTokens) + num(u.total_tokens) + num(u.total);
+    const inT = num(u.inputTokens) + num(u.input_tokens) + num(u.input);
+    const outT = num(u.outputTokens) + num(u.output_tokens) + num(u.output);
+    if (total === 0 && inT === 0 && outT === 0) return;
+    accum.totalTokens = Math.max(accum.totalTokens, total);
+    accum.inputTokens = Math.max(accum.inputTokens, inT);
+    accum.outputTokens = Math.max(accum.outputTokens, outT);
+    this.deps.state.updateAgent(issueId, { tokens: { ...accum } });
+  }
+
   async run(issue: Issue, attempt: number): Promise<AgentRunOutcome> {
     const cfg = this.deps.config();
     const workspacePath = await this.deps.workspace.ensure(issue);
@@ -70,6 +94,18 @@ export class AgentRunner {
 
         this.deps.state.updateAgent(issue.id, { turnCount: turnNumber });
 
+        // Mid-turn state poll: agent may transition Linear state via linear_graphql
+        // tool calls. Refresh dashboard every 5s so users see real-time progress.
+        const statePoll = setInterval(async () => {
+          try {
+            const fresh = await this.deps.linear.fetchIssuesByIds([issue.id]);
+            if (fresh[0]) {
+              this.deps.state.updateAgent(issue.id, { state: fresh[0].state });
+              issue.state = fresh[0].state;
+            }
+          } catch { /* poll failures are non-fatal */ }
+        }, 5000);
+
         const turnResult = await codex.runTurn(prompt, title, {
           onItem: (item) => {
             const last = (item.text ?? item.kind ?? item.type ?? "") as string;
@@ -78,21 +114,31 @@ export class AgentRunner {
               lastEventAt: new Date().toISOString(),
               lastMessage: typeof last === "string" ? last.slice(0, 240) : null,
             });
+            // Some Codex builds emit usage inside item events
+            if (typeof (item as { usage?: unknown }).usage === "object" && (item as { usage?: unknown }).usage) {
+              this.recordUsage(issue.id, (item as { usage: Record<string, unknown> }).usage, tokens);
+            }
           },
           onTokenUsage: (usage) => {
-            const total = num(usage.totalTokens) + num(usage.total_tokens);
-            const inT = num(usage.inputTokens) + num(usage.input_tokens);
-            const outT = num(usage.outputTokens) + num(usage.output_tokens);
-            tokens.totalTokens = Math.max(tokens.totalTokens, total);
-            tokens.inputTokens = Math.max(tokens.inputTokens, inT);
-            tokens.outputTokens = Math.max(tokens.outputTokens, outT);
-            this.deps.state.updateAgent(issue.id, { tokens: { ...tokens } });
+            this.recordUsage(issue.id, usage, tokens);
+          },
+          onAnyNotification: (method) => {
+            // Surface the method name in lastEvent for diagnosability
+            if (method === "thread/tokenUsage/updated" || method === "account/rateLimits/updated"
+                || method.startsWith("item/")) {
+              this.deps.state.updateAgent(issue.id, {
+                lastEvent: method,
+                lastEventAt: new Date().toISOString(),
+              });
+            }
           },
           onToolCall: async (call): Promise<ToolResult> => {
             this.deps.log.debug(`tool_call: ${call.name}`, { issue: issue.identifier });
             return await linearGraphql(call);
           },
         });
+
+        clearInterval(statePoll);
 
         if (turnResult.status === "failed" || turnResult.status === "cancelled" || turnResult.status === "timeout") {
           tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);

@@ -231,19 +231,30 @@ class AgentRunner {
 
 ## Tier 3 · Presentation
 
-### `src/server.ts` (TODO)
+### `src/server.ts` + `src/dashboard/*` (partial)
 
 Bun.serve HTTP API. Endpoints per SPEC §15:
 
 - `GET /api/v1/state` — snapshot of `RuntimeState`
 - `GET /api/v1/<issue-identifier>` — single-issue detail
 - `POST /api/v1/refresh` — trigger immediate poll
-- `GET /` — minimal HTML dashboard (no LiveView)
+- `GET /` — modular server-rendered HTML dashboard (no LiveView)
 
 ```ts
 function startServer(opts: { port: number; orchestrator: Orchestrator;
                               state: State }): { stop: () => Promise<void> };
 ```
+
+Current dashboard boundary:
+
+- `src/server.ts` owns server startup, route registration, and dependency wiring.
+- `src/dashboard/view_model.ts` adapts `State.snapshot()` into display-oriented rows and summary data.
+- `src/dashboard/render.ts` renders dashboard HTML and centralizes escaping.
+- `src/dashboard/styles.ts` keeps the dependency-free CSS module outside route handlers.
+
+Compatibility expectations: preserve `/api/v1/state`,
+`/api/v1/<issue-id-or-identifier>`, `POST /api/v1/refresh`, and CLI `--port`
+behavior. Future UI work should add compatible fields/endpoints only.
 
 ### `src/log.ts` (TODO)
 
@@ -261,7 +272,7 @@ orchestrator + server.
 
 - Hot reload of WORKFLOW.md (`fs.watch`)
 - SSH worker support (already handled via shell-out from agent prompt — may not need engine support)
-- Phoenix LiveView replacement (not needed; plain HTML+SSE fine)
+- Phoenix LiveView replacement (not needed; modular plain HTML+JSON is the current path)
 - Tests
 - Bun.compile single-binary build
 

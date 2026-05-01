@@ -6,6 +6,19 @@
 !bin/
 !bin/*
 
+# Compiled binaries are build artifacts (run `bun build --compile`), not source
+bin/symphony-ts
+
+# Bun build temp files
+ts-engine/.*-bun-build
+ts-engine/.*.bun-build*
+
+# Local agent / IDE config that shouldn't enter the fork
+AGENTS.md
+.claude/
+.codex/skills/openspec-*/
+openspec/
+
 # Per-profile secrets (committed: env.example only)
 profiles/*/env
 
@@ -28,6 +41,7 @@ profiles/*/codex-home/session_index.jsonl
 profiles/*/codex-home/shell_snapshots/
 profiles/*/codex-home/archived_sessions/
 profiles/*/codex-home/internal_storage.json
+profiles/*/codex-home/plugins/
 
 # Symphony engine local artifacts (kept out of fork)
 elixir/_build/

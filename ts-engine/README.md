@@ -37,9 +37,9 @@ module-by-module roadmap.
 | Orchestrator | TODO |
 | Workspace manager | TODO |
 | Codex App-Server JSON-RPC client | TODO |
-| HTTP API | TODO |
+| HTTP API + dashboard | partial (Bun server, JSON API, modular server-rendered dashboard) |
 | Hot reload | TODO (post-MVP) |
-| LiveView dashboard | won't port; serve plain HTML+JSON |
+| LiveView dashboard | won't port; serve modular plain HTML+JSON |
 
 ## Run
 
@@ -48,6 +48,20 @@ cd ts-engine
 bun install
 bun run src/main.ts ../profiles/content-wechat/WORKFLOW.md --port 4002
 ```
+
+## Dashboard Architecture
+
+The TS engine dashboard stays lightweight and server-rendered. `src/server.ts`
+owns Bun route wiring and delegates the dashboard page to `src/dashboard/`:
+
+- `view_model.ts` adapts `State.snapshot()` into display-ready dashboard data
+- `render.ts` renders HTML and owns escaping/layout composition
+- `styles.ts` keeps dashboard CSS out of route handlers
+
+Existing routes remain compatibility contracts: `/`, `/api/v1/state`,
+`/api/v1/<issue-id-or-identifier>`, and `POST /api/v1/refresh`. The first
+modular implementation is dependency-free and keeps CSS inline through a
+dedicated style module rather than adding a static asset endpoint.
 
 ## Test workflow loader
 
