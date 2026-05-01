@@ -18,6 +18,7 @@
 // cleaned_up=0 across consecutive runs).
 
 import type { ProjectAgent } from "../agents/project.js";
+import type { TrackerRefreshMessage } from "../queues/types.js";
 import { assertControlPlaneId, durableObjectName } from "../identity.js";
 
 type Env = {
@@ -26,6 +27,54 @@ type Env = {
   // The remaining bindings (LINEAR_API_KEY, etc.) are read by
   // ProjectAgent.poll directly via this.env.
 };
+
+type EnqueueEnv = Env & {
+  TRACKER_EVENTS: Queue<TrackerRefreshMessage>;
+};
+
+export type EnqueueSummary = {
+  scheduled_at: string;
+  enqueued: number;
+  projects: Array<{ tenant_id: string; slug: string }>;
+};
+
+/**
+ * Enumerate active profiles and enqueue one TrackerRefreshMessage per
+ * project on the symphony-tracker-events queue. The queue() handler in
+ * worker.ts consumes each message and calls ProjectAgent.poll. This is
+ * the cron-driven path; sync routes (refresh, admin/run-scheduled) still
+ * call poll directly for immediate operator feedback.
+ *
+ * Failure isolation: if a single sendBatch entry fails, Cloudflare Queues
+ * retries that entry; other projects in the batch are unaffected. We
+ * therefore prefer one sendBatch over many sequential send calls.
+ */
+export async function enqueueScheduledPolls(env: EnqueueEnv): Promise<EnqueueSummary> {
+  const scheduledAt = new Date().toISOString();
+  const { results } = await env.DB.prepare(
+    `SELECT tenant_id, slug
+       FROM profiles
+      WHERE archived_at IS NULL AND status = 'active'
+      ORDER BY tenant_id, slug`,
+  ).all<{ tenant_id: string; slug: string }>();
+  const targets = results ?? [];
+
+  if (targets.length > 0) {
+    await env.TRACKER_EVENTS.sendBatch(
+      targets.map((t) => ({
+        body: {
+          kind: "tracker.refresh" as const,
+          version: 1 as const,
+          tenant_id: t.tenant_id,
+          slug: t.slug,
+          scheduled_at: scheduledAt,
+        },
+      })),
+    );
+  }
+
+  return { scheduled_at: scheduledAt, enqueued: targets.length, projects: targets };
+}
 
 export type ScheduledPollSummary = {
   started_at: string;

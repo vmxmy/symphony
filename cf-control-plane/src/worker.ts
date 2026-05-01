@@ -29,7 +29,9 @@ import { LinearGraphqlClient } from "./tracker/linear.js";
 import type { LinearTrackerConfig } from "./tracker/types.js";
 import { extractLinearTrackerConfig } from "./tracker/config.js";
 import { assertControlPlaneId, durableObjectName } from "./identity.js";
-import { runScheduledPoll } from "./orchestration/scheduled_poll.js";
+import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/scheduled_poll.js";
+import { handleTrackerRefresh } from "./queues/handlers.js";
+import type { TrackerRefreshMessage } from "./queues/types.js";
 
 export { TenantAgent, ProjectAgent };
 
@@ -43,6 +45,9 @@ interface Env {
   // Linear API key (single-tenant for Phase 3 first cut; per-tenant
   // secrets land with Phase 8 ToolGatewayAgent).
   LINEAR_API_KEY?: string;
+  // Cloudflare Queue producer binding for tracker.refresh fan-out
+  // (cron path). Sync /refresh routes bypass the queue.
+  TRACKER_EVENTS: Queue<TrackerRefreshMessage>;
 }
 
 function tenantAgentFor(env: Env, tenantId: string) {
@@ -559,15 +564,25 @@ export default {
         }
       }
 
-      // ---- admin: run the scheduled poll on demand (Phase 3 cron mirror) ----
-      // Same poll path the cron trigger uses; here for testing without waiting
-      // for the next tick. Reuses write:project.refresh capability since this
-      // is "refresh all projects" semantically.
+      // ---- admin: synchronous fan-out poll (bypasses queue) ----
+      // Same poll path the cron trigger used to use directly. After Phase 3
+      // queue migration the cron path enqueues; this route stays sync so
+      // operators get immediate feedback. Reuses write:project.refresh.
       if (url.pathname === "/api/v1/admin/run-scheduled") {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
         const denied = requireCapability(principal, "write:project.refresh");
         if (denied) return denied;
         const summary = await runScheduledPoll(env);
+        return jsonResponse(summary);
+      }
+
+      // ---- admin: enqueue scheduled polls via the queue (test the
+      // cron-equivalent path on demand) ----
+      if (url.pathname === "/api/v1/admin/enqueue-scheduled") {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:project.refresh");
+        if (denied) return denied;
+        const summary = await enqueueScheduledPolls(env);
         return jsonResponse(summary);
       }
     }
@@ -577,15 +592,15 @@ export default {
 
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     // Cron trigger fires every 5 minutes (see wrangler.toml [triggers]).
-    // We log the summary for `wrangler tail` visibility; a future commit
-    // can persist it to D1 (e.g. as a system-level run_event) once we
-    // decide on a "scheduler run" model.
+    // Enqueue one TrackerRefreshMessage per active profile so failure
+    // isolation, retry, and dead-letter handling are owned by the queue.
+    // The queue() handler picks up messages and calls ProjectAgent.poll.
     ctx.waitUntil(
-      runScheduledPoll(env).then(
+      enqueueScheduledPolls(env).then(
         (summary) => {
           console.log(
             JSON.stringify({
-              kind: "scheduled_poll",
+              kind: "scheduled_enqueue",
               ...summary,
             }),
           );
@@ -593,13 +608,58 @@ export default {
         (err) => {
           console.error(
             JSON.stringify({
-              kind: "scheduled_poll_error",
+              kind: "scheduled_enqueue_error",
               error: String((err as Error)?.message ?? err),
             }),
           );
         },
       ),
     );
+  },
+
+  async queue(
+    batch: MessageBatch<TrackerRefreshMessage>,
+    env: Env,
+  ): Promise<void> {
+    // Queue consumer for symphony-tracker-events. Each message dispatches
+    // to a typed handler. Errors throw and Cloudflare Queues retries up
+    // to max_retries, then routes to the DLQ. Successful messages ack
+    // implicitly when the handler returns without throwing.
+    for (const message of batch.messages) {
+      try {
+        if (message.body.kind !== "tracker.refresh") {
+          console.error(
+            JSON.stringify({
+              kind: "queue_unknown_message_kind",
+              message_id: message.id,
+              body_kind: (message.body as { kind: string }).kind,
+            }),
+          );
+          message.ack();
+          continue;
+        }
+        const outcome = await handleTrackerRefresh(env, message.body);
+        console.log(
+          JSON.stringify({
+            kind: "tracker_refresh_consumed",
+            message_id: message.id,
+            attempts: message.attempts,
+            ...outcome,
+          }),
+        );
+        message.ack();
+      } catch (e) {
+        console.error(
+          JSON.stringify({
+            kind: "tracker_refresh_failed",
+            message_id: message.id,
+            attempts: message.attempts,
+            error: String((e as Error)?.message ?? e),
+          }),
+        );
+        message.retry();
+      }
+    }
   },
 };
 

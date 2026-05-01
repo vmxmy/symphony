@@ -52,12 +52,23 @@ new_sqlite_classes = ["TenantAgent", "ProjectAgent"]
 # bucket_name = "symphony-runs"
 
 # ---------------------------------------------------------------------------
-# Queues: dispatch / events / cleanup transport. See target.md §11.
-# Provisioned with the Worker entrypoint, not in this commit.
+# Queues: tracker-events transport. See target.md §11.
+#
+# symphony-tracker-events: cron-driven scheduler enqueues one
+# TrackerRefreshMessage per active profile; the Worker queue() handler
+# dispatches each to ProjectAgent.poll. Sync routes (POST /actions/refresh,
+# /admin/run-scheduled) bypass the queue for immediate operator feedback.
 # ---------------------------------------------------------------------------
-# [[queues.producers]]
-# binding = "DISPATCH"
-# queue = "symphony-dispatch"
+[[queues.producers]]
+binding = "TRACKER_EVENTS"
+queue = "symphony-tracker-events"
+
+[[queues.consumers]]
+queue = "symphony-tracker-events"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "symphony-tracker-events-dlq"
 
 # ---------------------------------------------------------------------------
 # Cron Triggers: scheduled ProjectAgent polling. Phase 3 second cut.
