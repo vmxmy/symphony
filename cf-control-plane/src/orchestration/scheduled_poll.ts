@@ -32,11 +32,34 @@ type EnqueueEnv = Env & {
   TRACKER_EVENTS: Queue<TrackerRefreshMessage>;
 };
 
+const MAX_QUEUE_SEND_BATCH = 100;
+
+type PollTarget = { tenant_id: string; slug: string };
+
 export type EnqueueSummary = {
   scheduled_at: string;
   enqueued: number;
-  projects: Array<{ tenant_id: string; slug: string }>;
+  projects: PollTarget[];
 };
+
+async function listActivePollTargets(env: Pick<Env, "DB">): Promise<PollTarget[]> {
+  const { results } = await env.DB.prepare(
+    `SELECT p.tenant_id, p.slug
+       FROM profiles p
+       JOIN tenants t ON t.id = p.tenant_id AND t.archived_at IS NULL
+      WHERE p.archived_at IS NULL
+        AND p.status = 'active'
+        AND t.status = 'active'
+      ORDER BY p.tenant_id, p.slug`,
+  ).all<PollTarget>();
+  return results ?? [];
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const batches: T[][] = [];
+  for (let i = 0; i < items.length; i += size) batches.push(items.slice(i, i + size));
+  return batches;
+}
 
 /**
  * Enumerate active profiles and enqueue one TrackerRefreshMessage per
@@ -51,17 +74,11 @@ export type EnqueueSummary = {
  */
 export async function enqueueScheduledPolls(env: EnqueueEnv): Promise<EnqueueSummary> {
   const scheduledAt = new Date().toISOString();
-  const { results } = await env.DB.prepare(
-    `SELECT tenant_id, slug
-       FROM profiles
-      WHERE archived_at IS NULL AND status = 'active'
-      ORDER BY tenant_id, slug`,
-  ).all<{ tenant_id: string; slug: string }>();
-  const targets = results ?? [];
+  const targets = await listActivePollTargets(env);
 
-  if (targets.length > 0) {
+  for (const batch of chunks(targets, MAX_QUEUE_SEND_BATCH)) {
     await env.TRACKER_EVENTS.sendBatch(
-      targets.map((t) => ({
+      batch.map((t) => ({
         body: {
           kind: "tracker.refresh" as const,
           version: 1 as const,
@@ -91,14 +108,7 @@ export type ScheduledPollSummary = {
 export async function runScheduledPoll(env: Env): Promise<ScheduledPollSummary> {
   const startedAt = Date.now();
   const startedAtIso = new Date(startedAt).toISOString();
-
-  const { results } = await env.DB.prepare(
-    `SELECT tenant_id, slug
-       FROM profiles
-      WHERE archived_at IS NULL AND status = 'active'
-      ORDER BY tenant_id, slug`,
-  ).all<{ tenant_id: string; slug: string }>();
-  const targets = results ?? [];
+  const targets = await listActivePollTargets(env);
 
   const failures: ScheduledPollSummary["failures"] = [];
   let succeeded = 0;

@@ -64,8 +64,9 @@ new_sqlite_classes = ["IssueAgent"]
 #
 # symphony-tracker-events: cron-driven scheduler enqueues one
 # TrackerRefreshMessage per active profile; the Worker queue() handler
-# dispatches each to ProjectAgent.poll. Sync routes (POST /actions/refresh,
-# /admin/run-scheduled) bypass the queue for immediate operator feedback.
+# dispatches each to ProjectAgent.poll. Sync routes
+# (POST /api/v1/projects/:tenant/:slug/actions/refresh and
+# /api/v1/admin/run-scheduled) bypass the queue for immediate operator feedback.
 # ---------------------------------------------------------------------------
 [[queues.producers]]
 binding = "TRACKER_EVENTS"
@@ -77,6 +78,21 @@ max_batch_size = 10
 max_batch_timeout = 5
 max_retries = 3
 dead_letter_queue = "symphony-tracker-events-dlq"
+
+# Phase 4 sub-cut 2: dispatch queue. Producer is the tracker-events
+# consumer (handleTrackerRefresh enqueues one issue.dispatch per
+# dispatch decision the reconcile harness emits). Consumer is the same
+# Worker queue() handler dispatching by batch.queue.
+[[queues.producers]]
+binding = "DISPATCH"
+queue = "symphony-dispatch"
+
+[[queues.consumers]]
+queue = "symphony-dispatch"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "symphony-dispatch-dlq"
 
 # ---------------------------------------------------------------------------
 # Cron Triggers: scheduled ProjectAgent polling. Phase 3 second cut.

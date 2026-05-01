@@ -11,14 +11,12 @@ it, with no traffic crossover until a profile explicitly opts in.
 
 ## Status
 
-Phase 2 control-plane skeleton is complete; Phase 3 (tracker adapter bridge) is
-in flight. Four of five Phase 3 deliverables have landed (LinearTrackerAdapter
-on Worker, scheduled ProjectAgent polling, D1 issue mirror, and the
-`POST /api/v1/refresh` compatibility route); queue-based tracker event
-ingestion is the remaining item being implemented this session. The Phase 3
-hardening work also added refresh idempotency, schema additions for the issue
-mirror, the scheduled cron handler, and an admin `run-scheduled` route to
-trigger polling on demand.
+Phase 2 control-plane skeleton is complete; Phase 3 (tracker adapter bridge)
+has landed. The Cloudflare Worker now runs the LinearTrackerAdapter, scheduled
+ProjectAgent polling, D1 issue mirror, queue-based tracker event ingestion, and
+the project-scoped refresh route. Phase 3 hardening also added refresh
+idempotency, schema additions for the issue mirror, the scheduled cron handler,
+and an admin `run-scheduled` route to trigger polling on demand.
 
 Phase 2 (skeleton):
 
@@ -40,7 +38,7 @@ Phase 3 (tracker adapter bridge):
 - [x] Scheduled ProjectAgent polling via cron (commit 48d085e).
 - [x] D1 issue mirror with idempotent upserts (commit 4b1c0aa).
 - [x] Queue-based tracker event ingestion (commit f185bf7).
-- [x] `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
+- [x] `POST /api/v1/projects/:tenant/:slug/actions/refresh` compatibility route (commit 4b1c0aa).
 
 ## Layout
 

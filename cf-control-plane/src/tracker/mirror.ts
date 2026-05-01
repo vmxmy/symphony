@@ -8,6 +8,9 @@
 //     constructed differently (e.g. earlier Phase 3 work used
 //     `${profileId}:${identifier}` while current code uses
 //     `${profileId}:${issue.id}`). Mixed id-format rows coexist safely.
+//   - If a pre-tracker/mock row exists with the same human identifier and a
+//     NULL external_id, attach the tracker external_id to that row instead of
+//     inserting a duplicate that would violate UNIQUE(profile_id, identifier).
 //   - Tracker-fetched issues always carry a non-null `issue.id` so the
 //     partial-index lookup is always valid in this code path; mock /
 //     non-tracker rows that have NULL external_id are managed elsewhere.
@@ -28,6 +31,17 @@ type MirrorStats = {
   unchanged: number;
 };
 
+type ExistingIssueRow = {
+  id: string;
+  external_id: string | null;
+  state: string;
+  identifier: string;
+  title: string | null;
+  url: string | null;
+  priority: number | null;
+  snapshot_json: string;
+};
+
 export async function mirrorIssues(
   db: D1Database,
   profileId: string,
@@ -43,20 +57,20 @@ export async function mirrorIssues(
 
     const existing = await db
       .prepare(
-          `SELECT id, identifier, state, title, url, priority, snapshot_json
+          `SELECT id, external_id, identifier, state, title, url, priority, snapshot_json
            FROM issues
           WHERE profile_id = ? AND external_id = ?`,
       )
       .bind(profileId, issue.id)
-      .first<{
-        id: string;
-        state: string;
-        identifier: string;
-        title: string | null;
-        url: string | null;
-        priority: number | null;
-        snapshot_json: string;
-      }>();
+      .first<ExistingIssueRow>() ??
+      await db
+        .prepare(
+          `SELECT id, external_id, identifier, state, title, url, priority, snapshot_json
+             FROM issues
+            WHERE profile_id = ? AND identifier = ? AND external_id IS NULL`,
+        )
+        .bind(profileId, issue.identifier)
+        .first<ExistingIssueRow>();
 
     if (!existing) {
       await db
@@ -89,6 +103,7 @@ export async function mirrorIssues(
     }
 
     const changed =
+      existing.external_id !== issue.id ||
       existing.state !== issue.state ||
       existing.identifier !== issue.identifier ||
       existing.title !== issue.title ||
@@ -100,12 +115,13 @@ export async function mirrorIssues(
       await db
         .prepare(
           `UPDATE issues
-              SET identifier = ?, state = ?, title = ?, url = ?, priority = ?,
+              SET external_id = ?, identifier = ?, state = ?, title = ?, url = ?, priority = ?,
                   snapshot_json = ?, last_seen_at = ?, updated_at = ?,
                   archived_at = NULL
             WHERE id = ?`,
         )
         .bind(
+          issue.id,
           issue.identifier,
           issue.state,
           issue.title,

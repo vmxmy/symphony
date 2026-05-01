@@ -25,4 +25,26 @@ export type TrackerRefreshMessage = {
   scheduled_at: string;
 };
 
-export type SymphonyQueueMessage = TrackerRefreshMessage;
+/**
+ * Phase 4 sub-cut 2: enqueued by handleTrackerRefresh for each `dispatch`
+ * decision the reconcile harness emits. Consumer calls IssueAgent.dispatch
+ * which transitions the agent state to `queued`. Phase 4 explicitly does
+ * not start runs from this signal yet — Phase 5 ExecutionWorkflow picks
+ * up from `queued`.
+ */
+export type IssueDispatchMessage = {
+  kind: "issue.dispatch";
+  version: 1;
+  tenant_id: string;
+  slug: string;
+  /** Tracker-side stable id (Linear UUID for linear, native id for cloudflare). */
+  external_id: string;
+  /** Human-readable issue identifier (e.g. SYM-42), echoed for logging. */
+  identifier: string;
+  /** reconcile-decided attempt counter (1-indexed). */
+  attempt: number;
+  /** ISO timestamp at which the producing poll fired. */
+  scheduled_at: string;
+};
+
+export type SymphonyQueueMessage = TrackerRefreshMessage | IssueDispatchMessage;

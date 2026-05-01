@@ -31,8 +31,12 @@ import type { LinearTrackerConfig } from "./tracker/types.js";
 import { extractLinearTrackerConfig } from "./tracker/config.js";
 import { assertControlPlaneId, durableObjectName } from "./identity.js";
 import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/scheduled_poll.js";
-import { handleTrackerRefresh } from "./queues/handlers.js";
-import type { TrackerRefreshMessage } from "./queues/types.js";
+import { handleTrackerRefresh, handleIssueDispatch } from "./queues/handlers.js";
+import type {
+  TrackerRefreshMessage,
+  IssueDispatchMessage,
+  SymphonyQueueMessage,
+} from "./queues/types.js";
 
 export { TenantAgent, ProjectAgent, IssueAgent };
 
@@ -50,6 +54,10 @@ interface Env {
   // Cloudflare Queue producer binding for tracker.refresh fan-out
   // (cron path). Sync /refresh routes bypass the queue.
   TRACKER_EVENTS: Queue<TrackerRefreshMessage>;
+  // Phase 4 sub-cut 2: dispatch queue. Tracker-events consumer enqueues
+  // one issue.dispatch per dispatch decision; consumer transitions
+  // IssueAgent into `queued`.
+  DISPATCH: Queue<IssueDispatchMessage>;
 }
 
 function tenantAgentFor(env: Env, tenantId: string) {
@@ -643,6 +651,39 @@ export default {
         const summary = await enqueueScheduledPolls(env);
         return jsonResponse(summary);
       }
+
+      // ---- admin: enqueue a single issue.dispatch message (test the
+      // dispatch queue path without needing a real active tracker issue) ----
+      // Body: { tenant_id, slug, external_id, identifier?, attempt? }
+      if (url.pathname === "/api/v1/admin/enqueue-dispatch") {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:issue.transition");
+        if (denied) return denied;
+        let body: Partial<IssueDispatchMessage> = {};
+        try {
+          body = (await req.json()) as Partial<IssueDispatchMessage>;
+        } catch {
+          return jsonResponse({ error: "bad_json" }, { status: 400 });
+        }
+        if (!body.tenant_id || !body.slug || !body.external_id) {
+          return jsonResponse(
+            { error: "missing_fields", required: ["tenant_id", "slug", "external_id"] },
+            { status: 400 },
+          );
+        }
+        const message: IssueDispatchMessage = {
+          kind: "issue.dispatch",
+          version: 1,
+          tenant_id: body.tenant_id,
+          slug: body.slug,
+          external_id: body.external_id,
+          identifier: body.identifier ?? body.external_id,
+          attempt: body.attempt ?? 1,
+          scheduled_at: new Date().toISOString(),
+        };
+        await env.DISPATCH.send(message);
+        return jsonResponse({ enqueued: true, message });
+      }
     }
 
     return notFound();
@@ -676,40 +717,57 @@ export default {
   },
 
   async queue(
-    batch: MessageBatch<TrackerRefreshMessage>,
+    batch: MessageBatch<SymphonyQueueMessage>,
     env: Env,
   ): Promise<void> {
-    // Queue consumer for symphony-tracker-events. Each message dispatches
-    // to a typed handler. Errors throw and Cloudflare Queues retries up
-    // to max_retries, then routes to the DLQ. Successful messages ack
-    // implicitly when the handler returns without throwing.
+    // Multi-queue consumer. Cloudflare delivers each batch from a single
+    // queue (visible on batch.queue); we discriminate by queue name and
+    // message body kind. Errors throw → Cloudflare Queues retries up to
+    // max_retries then routes to the DLQ.
     for (const message of batch.messages) {
       try {
-        if (message.body.kind !== "tracker.refresh") {
-          console.error(
+        if (batch.queue === "symphony-tracker-events" && message.body.kind === "tracker.refresh") {
+          const outcome = await handleTrackerRefresh(env, message.body);
+          console.log(
             JSON.stringify({
-              kind: "queue_unknown_message_kind",
+              kind: "tracker_refresh_consumed",
               message_id: message.id,
-              body_kind: (message.body as { kind: string }).kind,
+              attempts: message.attempts,
+              ...outcome,
             }),
           );
           message.ack();
           continue;
         }
-        const outcome = await handleTrackerRefresh(env, message.body);
-        console.log(
+        if (batch.queue === "symphony-dispatch" && message.body.kind === "issue.dispatch") {
+          const outcome = await handleIssueDispatch(env, message.body);
+          console.log(
+            JSON.stringify({
+              kind: "issue_dispatch_consumed",
+              message_id: message.id,
+              attempts: message.attempts,
+              ...outcome,
+            }),
+          );
+          message.ack();
+          continue;
+        }
+        // Unknown queue / kind combination — log and ack to avoid DLQ
+        // storms during a rolling deploy with stale messages.
+        console.error(
           JSON.stringify({
-            kind: "tracker_refresh_consumed",
+            kind: "queue_unknown_message",
+            queue: batch.queue,
             message_id: message.id,
-            attempts: message.attempts,
-            ...outcome,
+            body_kind: (message.body as { kind: string }).kind,
           }),
         );
         message.ack();
       } catch (e) {
         console.error(
           JSON.stringify({
-            kind: "tracker_refresh_failed",
+            kind: "queue_handler_failed",
+            queue: batch.queue,
             message_id: message.id,
             attempts: message.attempts,
             error: String((e as Error)?.message ?? e),

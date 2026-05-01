@@ -933,7 +933,7 @@ Compatibility routes should remain initially:
 | `GET /` | Dashboard UI |
 | `GET /api/v1/state` | Aggregate ProjectAgent/D1 snapshot |
 | `GET /api/v1/<issue-id-or-identifier>` | IssueAgent + D1 run details |
-| `POST /api/v1/refresh` | Ask ProjectAgent to poll/reconcile now |
+| `POST /api/v1/projects/:tenant/:slug/actions/refresh` | Ask ProjectAgent to poll/reconcile now |
 
 New routes:
 
@@ -1104,7 +1104,7 @@ Deliverables:
 - Scheduled ProjectAgent polling (commit 48d085e).
 - D1 issue mirror (commit 4b1c0aa).
 - Queue-based tracker event ingestion (commit f185bf7).
-- `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
+- `POST /api/v1/projects/:tenant/:slug/actions/refresh` compatibility route (commit 4b1c0aa).
 
 Exit criteria:
 
