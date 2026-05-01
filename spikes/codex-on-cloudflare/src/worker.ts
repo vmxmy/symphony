@@ -20,7 +20,7 @@ interface Env {
   OPENAI_API_KEY?: string;
 }
 
-const CONTAINER_INSTANCE_NAME = "persistent-bridge-v1";
+const CONTAINER_INSTANCE_NAME = "persistent-bridge-v2-tls";
 
 export class CodexContainer extends Container<Env> {
   // Container exposes its bridge on 8080 (see container/server.mjs).
