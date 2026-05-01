@@ -41,7 +41,16 @@ const res = await fetch(`${WORKER_URL}/run-turn`, {
 const totalMs = Date.now() - startedAt;
 const body = (await res.json()) as {
   durationMs: number;
-  outcome: { status: string; reason?: unknown; error?: string } | null;
+  outcome: {
+    status: string;
+    reason?: {
+      turn?: {
+        status?: string;
+        error?: { message?: string };
+      };
+    };
+    error?: string;
+  } | null;
   frameCount: number;
   frames: Array<{ kind: string; msg?: { method?: string } }>;
   stderrTail: string;
@@ -91,6 +100,16 @@ console.log(
   ),
 );
 
-if (body.outcome?.status !== "completed") {
+const bridgeCompleted = body.outcome?.status === "completed";
+const innerTurnStatus = body.outcome?.reason?.turn?.status;
+const turnCompleted = innerTurnStatus === undefined || innerTurnStatus === "completed";
+if (!bridgeCompleted || !turnCompleted) {
+  if (innerTurnStatus) {
+    console.error(`[smoke] inner turn status = ${innerTurnStatus}`);
+  }
+  const message = body.outcome?.reason?.turn?.error?.message ?? body.outcome?.error;
+  if (message) {
+    console.error(`[smoke] failure = ${message}`);
+  }
   process.exit(1);
 }
