@@ -15,6 +15,8 @@ import { State } from "./state.js";
 import { PromptBuilder } from "./prompt.js";
 import { Orchestrator } from "./orchestrator.js";
 import { startServer } from "./server.js";
+import { CodexAdapter } from "./agent/codex_adapter.js";
+import type { AgentFactory } from "./agent/types.js";
 
 type Args = {
   workflowPath: string;
@@ -98,6 +100,23 @@ async function main(): Promise<void> {
   const state = new State();
   const promptBuilder = new PromptBuilder(loaded.promptTemplate);
 
+  // For now, every workflow uses Codex. When a second adapter (Claude SDK,
+  // HTTP agent, etc.) lands, dispatch on cfg.agent.kind here.
+  const agentFactory: AgentFactory = () =>
+    new CodexAdapter(
+      {
+        command: cfg.codex.command,
+        approvalPolicy: cfg.codex.approvalPolicy,
+        threadSandbox: cfg.codex.threadSandbox,
+        turnSandboxPolicy: cfg.codex.turnSandboxPolicy,
+        turnTimeoutMs: cfg.codex.turnTimeoutMs,
+        readTimeoutMs: cfg.codex.readTimeoutMs,
+        stallTimeoutMs: cfg.codex.stallTimeoutMs,
+        autoApproveRequests: true,
+      },
+      logger,
+    );
+
   const orchestrator = new Orchestrator({
     linear,
     workspace,
@@ -105,6 +124,7 @@ async function main(): Promise<void> {
     promptBuilder,
     log: logger,
     config: () => cfg,
+    agentFactory,
   });
 
   const server = startServer({ port, state, orchestrator, log: logger });

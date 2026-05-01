@@ -7,6 +7,7 @@ import type { LinearClient } from "./linear.js";
 import type { WorkspaceManager } from "./workspace.js";
 import { State, nextBackoffMs } from "./state.js";
 import { AgentRunner } from "./agent.js";
+import type { AgentFactory } from "./agent/types.js";
 import { PromptBuilder } from "./prompt.js";
 
 export class Orchestrator {
@@ -22,6 +23,7 @@ export class Orchestrator {
       promptBuilder: PromptBuilder;
       log: Logger;
       config: () => WorkflowConfig;
+      agentFactory: AgentFactory;
     },
   ) {}
 

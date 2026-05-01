@@ -1,13 +1,14 @@
-// Per-issue agent execution loop. Spawns a fresh CodexAppServer per dispatch,
-// drives initialize → thread/start → loop(turn/start → turn/completed) until
-// the issue leaves active states or max_turns is reached.
+// Per-issue agent execution loop. Drives the generic Agent contract
+// (start → startSession → runTurn loop → stop) until the issue leaves
+// active states or max_turns is reached. Adapter-agnostic: the actual
+// agent (Codex / mock / future SDK) is injected via `agentFactory`.
 
 import type { Issue, WorkflowConfig, TokenUsage } from "./types.js";
 import type { Logger } from "./log.js";
 import type { LinearClient } from "./linear.js";
 import type { WorkspaceManager } from "./workspace.js";
 import type { State } from "./state.js";
-import { CodexAppServer, type ToolResult } from "./codex.js";
+import type { Agent, AgentFactory, ToolResult, AgentTokenUsage } from "./agent/types.js";
 import { PromptBuilder } from "./prompt.js";
 import { makeLinearGraphqlHandler, symphonyDynamicToolSpecs } from "./dynamic_tool.js";
 
@@ -17,80 +18,35 @@ export type AgentRunOutcome =
   | { status: "max_turns_exceeded" }
   | { status: "error"; error: string };
 
-export class AgentRunner {
-  constructor(
-    private deps: {
-      linear: LinearClient;
-      workspace: WorkspaceManager;
-      state: State;
-      promptBuilder: PromptBuilder;
-      log: Logger;
-      config: () => WorkflowConfig;
-    },
-  ) {}
+export type AgentRunnerDeps = {
+  linear: LinearClient;
+  workspace: WorkspaceManager;
+  state: State;
+  promptBuilder: PromptBuilder;
+  log: Logger;
+  config: () => WorkflowConfig;
+  agentFactory: AgentFactory;
+};
 
-  /**
-   * Defensive token-usage extractor. Codex emits usage data in multiple
-   * shapes (direct camelCase, snake_case, nested .usage / .tokens, etc).
-   * No-op if all extracted numbers are zero.
-   */
-  private recordUsage(
-    issueId: string,
-    usage: Record<string, unknown>,
-    accum: TokenUsage,
-  ): void {
-    // Codex sends thread/tokenUsage/updated as:
-    //   params.tokenUsage.total = {totalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens}
-    // earlier shapes (camel/snake/wrapped) are kept as fallbacks for safety.
-    const tu = usage.tokenUsage as Record<string, unknown> | undefined;
-    const u: Record<string, unknown> =
-      (tu?.total as Record<string, unknown>) ??
-      (tu as Record<string, unknown>) ??
-      (usage.usage as Record<string, unknown>) ??
-      (usage.tokens as Record<string, unknown>) ??
-      usage;
-    const total = num(u.totalTokens) + num(u.total_tokens);
-    const inT = num(u.inputTokens) + num(u.input_tokens);
-    const outT = num(u.outputTokens) + num(u.output_tokens);
-    if (total === 0 && inT === 0 && outT === 0) return;
-    accum.totalTokens = Math.max(accum.totalTokens, total);
-    accum.inputTokens = Math.max(accum.inputTokens, inT);
-    accum.outputTokens = Math.max(accum.outputTokens, outT);
-    this.deps.state.updateAgent(issueId, { tokens: { ...accum } });
-  }
+export class AgentRunner {
+  constructor(private deps: AgentRunnerDeps) {}
 
   async run(issue: Issue, attempt: number): Promise<AgentRunOutcome> {
     const cfg = this.deps.config();
     const workspacePath = await this.deps.workspace.ensure(issue);
     const session = this.deps.state.startAgent(issue, workspacePath);
 
-    const codex = new CodexAppServer(
-      {
-        command: cfg.codex.command,
-        cwd: workspacePath,
-        approvalPolicy: cfg.codex.approvalPolicy,
-        threadSandbox: cfg.codex.threadSandbox,
-        turnSandboxPolicy: cfg.codex.turnSandboxPolicy,
-        turnTimeoutMs: cfg.codex.turnTimeoutMs,
-        readTimeoutMs: cfg.codex.readTimeoutMs,
-        stallTimeoutMs: cfg.codex.stallTimeoutMs,
-        autoApproveRequests: true,
-        dynamicTools: symphonyDynamicToolSpecs,
-      },
-      this.deps.log,
-    );
-
+    const agent: Agent = this.deps.agentFactory({ cwd: workspacePath });
     const linearGraphql = makeLinearGraphqlHandler(this.deps.linear);
     const tokens: TokenUsage = { totalTokens: 0, inputTokens: 0, outputTokens: 0, secondsRunning: 0 };
     const startedAt = Date.now();
 
     try {
-      // before_run hook (if defined)
       try { await this.deps.workspace.runHook("before_run", workspacePath); }
       catch (e) { this.deps.log.warn(`before_run failed: ${(e as Error).message}`); }
 
-      await codex.start();
-      await codex.startThread();
+      await agent.start();
+      await agent.startSession({ cwd: workspacePath, tools: symphonyDynamicToolSpecs });
 
       let turnNumber = 0;
       while (turnNumber < cfg.agent.maxTurns) {
@@ -112,31 +68,19 @@ export class AgentRunner {
           } catch { /* poll failures are non-fatal */ }
         }, 5000);
 
-        const turnResult = await codex.runTurn(prompt, title, {
-          onItem: (item) => {
-            const last = (item.text ?? item.kind ?? item.type ?? "") as string;
+        const turnResult = await agent.runTurn(prompt, title, {
+          onActivity: (info) => {
             this.deps.state.updateAgent(issue.id, {
-              lastEvent: "notification",
+              lastEvent: info.label,
               lastEventAt: new Date().toISOString(),
-              lastMessage: typeof last === "string" ? last.slice(0, 240) : null,
+              lastMessage: info.text ?? null,
             });
-            // Some Codex builds emit usage inside item events
-            if (typeof (item as { usage?: unknown }).usage === "object" && (item as { usage?: unknown }).usage) {
-              this.recordUsage(issue.id, (item as { usage: Record<string, unknown> }).usage, tokens);
-            }
           },
-          onTokenUsage: (usage) => {
-            this.recordUsage(issue.id, usage, tokens);
-          },
-          onAnyNotification: (method) => {
-            // Surface the method name in lastEvent for diagnosability
-            if (method === "thread/tokenUsage/updated" || method === "account/rateLimits/updated"
-                || method.startsWith("item/")) {
-              this.deps.state.updateAgent(issue.id, {
-                lastEvent: method,
-                lastEventAt: new Date().toISOString(),
-              });
-            }
+          onTokenUsage: (usage: AgentTokenUsage) => {
+            tokens.totalTokens = Math.max(tokens.totalTokens, usage.totalTokens);
+            tokens.inputTokens = Math.max(tokens.inputTokens, usage.inputTokens);
+            tokens.outputTokens = Math.max(tokens.outputTokens, usage.outputTokens);
+            this.deps.state.updateAgent(issue.id, { tokens: { ...tokens } });
           },
           onToolCall: async (call): Promise<ToolResult> => {
             this.deps.log.debug(`tool_call: ${call.name}`, { issue: issue.identifier });
@@ -146,10 +90,15 @@ export class AgentRunner {
 
         clearInterval(statePoll);
 
+        // Adapter may surface a session id mid-flight; record the first one we see.
+        if (!session.sessionId && turnResult.sessionId) {
+          this.deps.state.updateAgent(issue.id, { sessionId: turnResult.sessionId });
+        }
+
         if (turnResult.status === "failed" || turnResult.status === "cancelled" || turnResult.status === "timeout") {
           tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
           this.deps.state.finishAgent(issue.id, tokens);
-          await codex.stop();
+          await agent.stop();
           return { status: "error", error: `turn_${turnResult.status}: ${JSON.stringify(turnResult.reason ?? "")}` };
         }
 
@@ -160,49 +109,34 @@ export class AgentRunner {
           updated && cfg.tracker.activeStates.includes(updated.state);
 
         if (!updated) {
-          // Issue not visible (terminal/cancelled/etc)
           tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
           this.deps.state.finishAgent(issue.id, tokens);
-          await codex.stop();
+          await agent.stop();
           return { status: "issue_state_changed", newState: "missing" };
         }
 
         if (!stillActive) {
           tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
           this.deps.state.finishAgent(issue.id, tokens);
-          await codex.stop();
+          await agent.stop();
           return { status: "issue_state_changed", newState: updated.state };
         }
-        // sync session.state to actual state
         this.deps.state.updateAgent(issue.id, { state: updated.state });
-        // mutate the issue object so subsequent prompt rebuilds see latest state
         issue.state = updated.state;
-
-        // session ID surfaces post first turn — best-effort grab
-        if (!session.sessionId && (turnResult.reason as { session_id?: string })?.session_id) {
-          this.deps.state.updateAgent(issue.id, {
-            sessionId: (turnResult.reason as { session_id: string }).session_id,
-          });
-        }
       }
 
-      // max_turns exhausted
       tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
       this.deps.state.finishAgent(issue.id, tokens);
-      await codex.stop();
+      await agent.stop();
       return { status: "max_turns_exceeded" };
     } catch (e) {
       tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
       this.deps.state.finishAgent(issue.id, tokens);
-      try { await codex.stop(); } catch { /* ignore */ }
+      try { await agent.stop(); } catch { /* ignore */ }
       try { await this.deps.workspace.runHook("after_run", workspacePath); } catch { /* ignore */ }
       return { status: "error", error: (e as Error).message };
     } finally {
       try { await this.deps.workspace.runHook("after_run", workspacePath); } catch { /* ignore */ }
     }
   }
-}
-
-function num(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
