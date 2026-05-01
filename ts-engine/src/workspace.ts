@@ -6,10 +6,15 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import type { HooksConfig, WorkflowConfig, Issue } from "./types.js";
 import type { Logger } from "./log.js";
+import type {
+  HookName,
+  WorkspaceAdapter,
+  WorkspaceRef,
+} from "./contracts/workspace.js";
 
-export type HookName = "after_create" | "before_run" | "after_run" | "before_remove";
+export type { HookName, WorkspaceRef };
 
-export class WorkspaceManager {
+export class WorkspaceManager implements WorkspaceAdapter {
   constructor(
     private cfg: { root: string; hooks: HooksConfig },
     private log: Logger,
@@ -18,17 +23,17 @@ export class WorkspaceManager {
   }
 
   /**
-   * Returns the absolute path. Creates the directory and runs after_create
-   * if it didn't already exist.
+   * Idempotent: returns the workspace ref, creating the directory and
+   * running after_create only if it did not already exist.
    */
-  async ensure(issue: Issue): Promise<string> {
+  async ensure(issue: Issue): Promise<WorkspaceRef> {
     const path = this.pathFor(issue);
     const fresh = !existsSync(path);
     if (fresh) {
       mkdirSync(path, { recursive: true });
-      await this.runHook("after_create", path);
+      await this.runHook("after_create", { path, host: null });
     }
-    return path;
+    return { path, host: null };
   }
 
   pathFor(issue: Issue): string {
@@ -39,7 +44,7 @@ export class WorkspaceManager {
     const path = this.pathFor(issue);
     if (!existsSync(path)) return;
     try {
-      await this.runHook("before_remove", path);
+      await this.runHook("before_remove", { path, host: null });
     } catch (e) {
       // hook failures are non-fatal per SPEC
       this.log.warn(`before_remove hook failed: ${(e as Error).message}`, {
@@ -55,10 +60,10 @@ export class WorkspaceManager {
     }
   }
 
-  async runHook(name: HookName, cwd: string): Promise<void> {
+  async runHook(name: HookName, workspace: WorkspaceRef): Promise<void> {
     const cmd = this.cfg.hooks[hookKey(name)];
     if (!cmd) return;
-    await runShell(cmd, cwd, this.cfg.hooks.timeoutMs);
+    await runShell(cmd, workspace.path, this.cfg.hooks.timeoutMs);
   }
 }
 

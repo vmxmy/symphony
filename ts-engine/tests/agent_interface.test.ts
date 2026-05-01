@@ -282,7 +282,7 @@ function makeHarness(opts: HarnessOptions): {
   const toolGateway = new LinearToolGateway(linear);
 
   const runner = new AgentRunner({
-    linear,
+    tracker: linear,
     workspace,
     state,
     promptBuilder,
