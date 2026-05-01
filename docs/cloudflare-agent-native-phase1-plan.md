@@ -583,12 +583,12 @@ Do not let lanes modify the same files without coordination. Final verifier runs
 
 Phase 1 can be implemented independently, but Phase 2 must not start just because Phase 1 passes. The target-document review added these blockers before any Phase 2 Cloudflare control-plane code:
 
-1. Pin Cloudflare account entitlements and platform limits in `docs/cloudflare-platform-limits.md`.
-2. Run a Codex-in-WorkerHost spike comparing VPS Docker and Cloudflare-managed substrates, then choose the Phase 6/7 default substrate or document a dual-path risk.
-3. Finalize the ToolGateway idempotency contract, including key format, D1 persistence, and replay behavior.
-4. Finalize v1-to-v2 profile import/migration policy and dry-run validator behavior.
-5. Pick the developer loop for profile import, preview refresh, debugging, and reset.
-6. Define a reconciliation diff harness for Phase 3 parity with the current `Orchestrator.tick` behavior.
+1. ✅ Pin Cloudflare account entitlements and platform limits in `docs/cloudflare-platform-limits.md`. — DONE (`docs/cloudflare-platform-limits.md`).
+2. ✅ Run a Codex-in-WorkerHost spike comparing VPS Docker and Cloudflare-managed substrates, then choose the Phase 6/7 default substrate or document a dual-path risk. — DONE (`spikes/codex-on-cloudflare/REPORT.md` §15).
+3. ✅ Finalize the ToolGateway idempotency contract, including key format, D1 persistence, and replay behavior. — DONE at the doc level (`docs/cloudflare-agent-native-target.md` §13.1); the D1 `idempotency_records` table is in place in `cf-control-plane/migrations/0001_init.sql`.
+4. ✅ Finalize v1-to-v2 profile import/migration policy and dry-run validator behavior. — DONE (`docs/cloudflare-agent-native-target.md` §10.1; importer at `cf-control-plane/scripts/import-profile.ts`).
+5. ✅ Pick the developer loop for profile import, preview refresh, debugging, and reset. — DONE (`docs/cloudflare-agent-native-target.md` §14.1).
+6. ✅ Define a reconciliation diff harness for Phase 3 parity with the current `Orchestrator.tick` behavior. — DONE (commit 21c297b).
 
 These gates are intentionally out of scope for Phase 1 implementation, but the Phase 1 contracts should not make any of them harder.
 

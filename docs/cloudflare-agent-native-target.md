@@ -1100,15 +1100,15 @@ Goal: move polling/reconciliation into ProjectAgent while keeping Linear compati
 
 Deliverables:
 
-- LinearTrackerAdapter running on Cloudflare Workers.
-- Scheduled ProjectAgent polling.
-- D1 issue mirror.
-- Queue-based tracker event ingestion.
-- `POST /api/v1/refresh` compatibility route.
+- LinearTrackerAdapter running on Cloudflare Workers (commit 4b1c0aa).
+- Scheduled ProjectAgent polling (commit 48d085e).
+- D1 issue mirror (commit 4b1c0aa).
+- Queue-based tracker event ingestion (in progress this session).
+- `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
 
 Exit criteria:
 
-- ProjectAgent mirrors active and terminal Linear issues into D1.
+- ProjectAgent mirrors active and terminal Linear issues into D1 (verified via live smoke against the deployed Worker).
 - Reconciliation decisions match the current local engine for a test profile.
 - No issue execution starts yet unless explicitly enabled.
 

@@ -11,6 +11,17 @@ it, with no traffic crossover until a profile explicitly opts in.
 
 ## Status
 
+Phase 2 control-plane skeleton is complete; Phase 3 (tracker adapter bridge) is
+in flight. Four of five Phase 3 deliverables have landed (LinearTrackerAdapter
+on Worker, scheduled ProjectAgent polling, D1 issue mirror, and the
+`POST /api/v1/refresh` compatibility route); queue-based tracker event
+ingestion is the remaining item being implemented this session. The Phase 3
+hardening work also added refresh idempotency, schema additions for the issue
+mirror, the scheduled cron handler, and an admin `run-scheduled` route to
+trigger polling on demand.
+
+Phase 2 (skeleton):
+
 - [x] D1 schema (`migrations/0001_init.sql`) — first cut covering tenants,
       profiles, issues, runs, run_steps, run_events, tool_calls, approvals,
       and idempotency_records (per target §11 + §13.1).
@@ -22,6 +33,14 @@ it, with no traffic crossover until a profile explicitly opts in.
 - [x] Read-only dashboard rendered from D1 read models.
 - [x] Mock orchestration run that emits `runs`, `run_steps`, `run_events`, and
       `tool_calls`.
+
+Phase 3 (tracker adapter bridge):
+
+- [x] LinearTrackerAdapter running on Cloudflare Workers (commit 4b1c0aa).
+- [x] Scheduled ProjectAgent polling via cron (commit 48d085e).
+- [x] D1 issue mirror with idempotent upserts (commit 4b1c0aa).
+- [ ] Queue-based tracker event ingestion (in progress this session).
+- [x] `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
 
 ## Layout
 
@@ -137,4 +156,4 @@ writes `NULL` refs until the R2 bucket lands.
 | ToolGateway idempotency contract | ✅ doc-level (`target.md §13.1`); table here (`idempotency_records`) |
 | v1→v2 profile import policy | ✅ doc-level (`target.md §10.1`); columns here (`source_schema_version`, `defaults_applied`, `warnings`) |
 | Developer loop pick | ✅ doc-level (`target.md §14.1`) |
-| Reconciliation diff harness | ⏸ Phase 3 |
+| Reconciliation diff harness | ✅ Phase 3 readiness gate (commit 21c297b) |
