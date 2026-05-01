@@ -1,40 +1,60 @@
 # Symphony
 
-Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
-work instead of supervising coding agents.
+Symphony is a TypeScript/Bun automation service that turns tracker issues into isolated Codex implementation runs. It polls a project workflow, creates a per-issue workspace, runs an agent session, records observability data, and exposes a lightweight dashboard/API for operators.
 
-[![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](.github/media/symphony-demo.mp4)
+This fork is organized around reusable **profiles**: each profile packages a `WORKFLOW.md`, credentials template, skills, and isolated `CODEX_HOME` so multiple pipelines can run from the same engine without sharing runtime state.
 
-_In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
+## What is in this repo
 
-> [!WARNING]
-> Symphony is a low-key engineering preview for testing in trusted environments.
+- `ts-engine/` — the active TypeScript Symphony engine
+- `bin/symphony` — source-tree wrapper for running the TS engine with Bun
+- `bin/symphony-launch` — profile-aware process manager
+- `profiles/` — workflow bundles and the profile template
+- `docs/` — architecture, profile, launcher, and deployment docs
+- `SPEC.md` — language-agnostic Symphony behavior contract
 
-## Running Symphony
+## Quick Start
 
-### Requirements
+Install Bun, then run the engine directly:
 
-Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+```bash
+cd ts-engine
+bun install
+bun run src/main.ts ../profiles/content-wechat/WORKFLOW.md \
+  --port 4001 \
+  --logs-root ../profiles/content-wechat/runtime/log \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
 
-### Option 1. Make your own
+Or use the profile launcher:
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
+```bash
+cp profiles/content-wechat/env.example profiles/content-wechat/env
+$EDITOR profiles/content-wechat/env
+./bin/symphony-launch check content-wechat
+./bin/symphony-launch start content-wechat
+open http://127.0.0.1:4001/
+```
 
-> Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
+## Development
 
-### Option 2. Use our experimental reference implementation
+```bash
+make setup
+make typecheck
+make test
+make build
+make all
+```
 
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
+`make build` compiles `ts-engine/src/main.ts` to `bin/symphony-ts`, which is ignored as a local build artifact. The tracked `bin/symphony` wrapper runs the same engine from source.
 
-> Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
+## Documentation
 
----
+- [Architecture](docs/architecture.md)
+- [Profile specification](docs/profile-spec.md)
+- [Launcher CLI](docs/launcher-cli.md)
+- [Creating a profile](docs/creating-a-profile.md)
+- [Deployment](docs/deployment.md)
 
 ## License
 

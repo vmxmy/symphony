@@ -1,4 +1,4 @@
-// CLI entry point. Drop-in replacement for elixir/bin/symphony — accepts:
+// CLI entry point for the active TypeScript Symphony engine. Accepts:
 //   symphony-ts <WORKFLOW.md> [--port N] [--logs-root DIR]
 //                             [--i-understand-that-this-will-be-running-without-the-usual-guardrails]
 //

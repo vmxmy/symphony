@@ -1,6 +1,6 @@
 # Deployment
 
-The launcher + Symphony engine + at least one profile is enough for local
+The launcher + TypeScript Symphony engine + at least one profile is enough for local
 operation. For pipelines that depend on **fixed-IP egress** (e.g., WeChat API
 IP whitelist) a small VPS is needed for the affected stages.
 
@@ -12,7 +12,7 @@ If your pipeline does not need fixed-IP egress, no extra deployment is needed:
 ./bin/symphony-launch start <profile>
 ```
 
-The Symphony engine, Codex, all skills run on your local machine. Workspaces
+The TypeScript engine, Codex, and all skills run on your local machine. Workspaces
 and archives live under `~/symphony-content-workspaces/` and
 `~/symphony-content-archive/` (or whatever the profile's `workspace_root` /
 `archive_root` declare).

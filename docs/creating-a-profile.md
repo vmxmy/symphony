@@ -218,16 +218,13 @@ Continuation attempt #{{ attempt }}. First action: read recent comments via
 linear_graphql before continuing. Reuse workspace artifacts.
 {% endif %}
 
-## CRITICAL: fetch issue content via linear_graphql
+## Fetch current issue context when needed
 
-This template **must not** reference `{{ issue.title }}`, `{{ issue.description }}`,
-`{{ issue.labels }}`, or `{{ issue.url }}` directly — the engine's template
-renderer corrupts certain UTF-8 byte sequences (notably 0x85, present in many
-Chinese characters). Fetch them from Linear at runtime instead:
+The TypeScript engine supports UTF-8 and `{{ issue.* }}` substitutions. For long-running work, still fetch mutable tracker context at runtime when it matters:
 
-1. First action every turn: call `linear_graphql` to fetch:
-   - title, description, labels (names), and 5 most recent comments
-2. Treat those as the authoritative spec.
+1. At the start of a continuation turn, call tracker tools or `linear_graphql` to fetch recent comments.
+2. Before state transitions or publishing, re-check title, description, labels, and current state.
+3. Treat freshly fetched tracker data as authoritative over stale prompt-rendered context.
 
 ## Your workflow (by current state)
 
@@ -252,14 +249,9 @@ Chinese characters). Fetch them from Linear at runtime instead:
 
 ### Three frontmatter+body rules to commit to memory
 
-1. **frontmatter must be ASCII.** YamlElixir parser is strict; Chinese in YAML
-   comments breaks parsing.
-2. **Liquid body must be ASCII.** And do not substitute `{{ issue.* }}` for
-   any field that may carry user-generated text (Chinese titles, URL slugs).
-3. **Active vs PAUSE vs terminal states must form a partition.** A state name
-   listed in `active_states` or `terminal_states` is dispatch-eligible or
-   cleanup-eligible respectively. Anything else is a PAUSE point. Misclassifying
-   leads to either runaway agents or stuck workspaces.
+1. **Keep operational keys simple.** YAML keys, state names, and shell-facing paths are easiest to debug when they stay ASCII.
+2. **UTF-8 prompt text is supported.** The TypeScript engine uses `yaml` and `liquidjs`, so Chinese prompt bodies and `{{ issue.* }}` substitutions are allowed.
+3. **Active vs PAUSE vs terminal states must form a partition.** A state name listed in `active_states` or `terminal_states` is dispatch-eligible or cleanup-eligible respectively. Anything else is a PAUSE point. Misclassifying leads to either runaway agents or stuck workspaces.
 
 ---
 
@@ -478,19 +470,11 @@ Filter out tick noise to see real events.
 
 ## 10. Anti-patterns
 
-### ❌ Chinese in WORKFLOW.md frontmatter
-YamlElixir parses fail. Even Chinese in YAML *comments* break it. **All
-frontmatter ASCII.**
+### ❌ Hiding workflow logic in shell hooks
+Keep the state-machine intent in `WORKFLOW.md`. Hooks are good for setup, archiving, and integration glue; they should not become an unreadable second orchestrator.
 
-### ❌ Chinese static text in Liquid prompt body
-Solid (template renderer) + some path in the engine corrupt UTF-8 byte 0x85
-(present in many Chinese chars like `公` `者` `配`). **All prompt body ASCII.**
-Use `linear_graphql` to fetch Chinese content at runtime.
-
-### ❌ Substituting `{{ issue.title }}` etc. in body
-Same reason. Linear auto-generates URL slugs from titles, so even `{{ issue.url }}`
-can carry Chinese. **Allowed substitutions**: `{{ issue.identifier }}` (always
-ASCII), `{{ issue.state }}` (you control state names), `{{ attempt }}` (number).
+### ❌ Trusting user-generated fields in shell snippets
+`{{ issue.title }}` and other tracker fields can contain spaces, quotes, or Unicode. Render them freely in prompt prose, but shell commands should quote variables carefully or fetch data at runtime through tools.
 
 ### ❌ Auto-publishing without a review gate
 For any external system that has reputation/compliance/cost consequences

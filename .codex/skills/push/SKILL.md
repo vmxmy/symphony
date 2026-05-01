@@ -26,7 +26,7 @@ description:
 ## Steps
 
 1. Identify current branch and confirm remote state.
-2. Run local validation (`make -C elixir all`) before pushing.
+2. Run local validation (`make all`) before pushing.
 3. Push branch to `origin` with upstream tracking if needed, using whatever
    remote URL is already configured.
 4. If push is not clean/rejected:
@@ -52,7 +52,7 @@ description:
      scope (all intended work on the branch), not just the newest commits,
      including newly added work, removed work, or changed approach.
    - Do not reuse stale description text from earlier iterations.
-7. Validate PR body with `mix pr_body.check` and fix all reported issues.
+7. Validate the PR body follows `.github/pull_request_template.md` and fix any missing headings/placeholders.
 8. Reply with the PR URL from `gh pr view`.
 
 ## Commands
@@ -62,7 +62,7 @@ description:
 branch=$(git branch --show-current)
 
 # Minimal validation gate
-make -C elixir all
+make all
 
 # Initial push: respect the current origin remote.
 git push -u origin HEAD
@@ -101,7 +101,15 @@ fi
 
 tmp_pr_body=$(mktemp)
 gh pr view --json body -q .body > "$tmp_pr_body"
-(cd elixir && mix pr_body.check --file "$tmp_pr_body")
+PR_BODY_FILE="$tmp_pr_body" python3 - <<'PY2'
+import os
+from pathlib import Path
+body = Path(os.environ["PR_BODY_FILE"]).read_text()
+required = ["#### Context", "#### TL;DR", "#### Summary", "#### Alternatives", "#### Test Plan"]
+missing = [h for h in required if h not in body]
+if missing:
+    raise SystemExit("Missing PR headings: " + ", ".join(missing))
+PY2
 rm -f "$tmp_pr_body"
 
 # Show PR URL for the reply

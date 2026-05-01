@@ -1,9 +1,8 @@
 ---
 # Rename to WORKFLOW.md after copying.
-# IMPORTANT: keep this entire file ASCII-only. Symphony's Solid template
-# renderer corrupts UTF-8 byte 0x85 -> 0x0A, breaking Chinese characters.
-# Inject Chinese issue content via linear_graphql at runtime, not via
-# Liquid {{ issue.title }} substitution.
+# UTF-8 prompt bodies are supported by the TypeScript engine. Keep
+# operational keys/state names simple because shell hooks and tracker
+# filters are easier to debug that way.
 
 tracker:
   kind: linear
@@ -53,11 +52,11 @@ This is continuation attempt #{{ attempt }}. First action: read the most
 recent 5 comments via linear_graphql before continuing.
 {% endif %}
 
-## CRITICAL: Issue content rule
+## Issue content rule
 
-Symphony's template engine corrupts non-ASCII characters in this prompt body.
-ALWAYS fetch the issue's title, description, and labels via `linear_graphql`
-at the start of every turn. Do NOT rely on `{{ issue.title }}` substitution.
+The rendered prompt includes the stable ticket identifier and state. Fetch the
+latest title, description, labels, and comments through tracker tools when the
+current stage depends on fresh issue content.
 
 ## Your workflow
 

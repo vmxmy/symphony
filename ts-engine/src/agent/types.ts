@@ -8,8 +8,6 @@
 //   - Anything that's truly agent-specific lives in `SessionOptions.hints`
 //     (a typed escape hatch) rather than polluting the interface.
 //
-// See docs/PORTING-PLAN.md for how this maps onto the future Elixir port.
-//
 // NOTE: this is the *contract* layer. Concrete adapters live in
 // agent/codex_adapter.ts (production) and agent/mock_adapter.ts (tests).
 

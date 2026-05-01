@@ -17,7 +17,7 @@ export type PromptContext = {
 };
 
 // What the Liquid template sees as `issue.*`. Snake_case to match
-// existing WORKFLOW.md (Elixir engine uses Map.from_struct → snake_case).
+// existing WORKFLOW.md templates and the public SPEC shape.
 type IssueLiquidShape = {
   id: string;
   identifier: string;

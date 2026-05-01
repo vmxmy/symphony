@@ -2,10 +2,9 @@
 # Symphony self-media workflow v2 (Tier 2: Standard editorial pipeline)
 # Plan file: ~/.claude-accounts/max-2/plans/codex-cli-scalable-locket.md
 # Backup: WORKFLOW.md.bak.<timestamp>
-# Note: keep this WHOLE file ASCII-only. Symphony's Solid renderer corrupts
-# UTF-8 byte 0x85 -> 0x0A, breaking Chinese characters. Do NOT inject
-# {{ issue.title }} / {{ issue.description }} / {{ issue.labels }} (often Chinese).
-# Agent fetches them via linear_graphql at runtime.
+# Note: the TypeScript engine renders UTF-8 safely. This workflow still keeps
+# the static prompt mostly ASCII by convention and asks the agent to fetch
+# mutable issue content via linear_graphql at runtime.
 
 tracker:
   kind: linear
@@ -76,9 +75,9 @@ You are working on Linear ticket: {{ issue.identifier }}
 Current state: {{ issue.state }}
 
 (URL intentionally omitted from this prompt: Linear auto-generates URL slugs
-from issue titles, which often contain Chinese characters. Symphony's Solid
-template renderer corrupts UTF-8 byte 0x85 -> 0x0A on rendering, breaking
-characters like `者` (E8 80 85). Fetch the URL via linear_graphql if needed.)
+from issue titles, and this workflow prefers fetching mutable issue fields at
+runtime through linear_graphql, avoiding stale prompt-rendered tracker metadata.
+Fetch the URL via linear_graphql if needed.)
 
 {% if attempt %}
 This is continuation attempt #{{ attempt }}. FIRST action: use the linear_graphql

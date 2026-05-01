@@ -46,7 +46,7 @@ symphony:
   archive_root:   ~/x-archive    # before_remove hook target
 ```
 
-The launcher auto-detects the Symphony binary from `$(dirname "$0")/../elixir/bin/symphony`.
+The launcher auto-detects the Symphony binary from `$(dirname "$0")/symphony`.
 Profiles **must not** include a `binary:` field — it would couple the profile
 to a specific install path.
 
@@ -98,7 +98,7 @@ Free-form notes for maintainers. Not parsed by the launcher.
 ## WORKFLOW.md (managed by the engine, not the launcher)
 
 This file's frontmatter is consumed by Symphony itself, not by the launcher.
-Schema: see upstream `SPEC.md`. Highlights specific to this fork:
+Schema: see `SPEC.md`. Highlights specific to this fork:
 
 ```yaml
 ---
@@ -129,15 +129,12 @@ codex:
     type: dangerFullAccess
 ---
 
-(prompt body, ASCII-only — Solid template engine corrupts UTF-8 byte 0x85)
+(prompt body, UTF-8 supported)
 ```
 
-### ASCII-only rule
+### UTF-8 rendering
 
-Symphony's Solid template renderer corrupts UTF-8 byte `0x85` to `0x0A`,
-which breaks any Chinese characters in the prompt body. **Keep the entire
-WORKFLOW.md ASCII-only**. Inject Chinese issue content via `linear_graphql`
-tool calls at runtime, not via Liquid `{{ issue.title }}` substitution.
+The TypeScript engine uses `yaml` and `liquidjs`; UTF-8 prompt bodies and `{{ issue.* }}` substitutions are supported. Keep YAML keys and operational state names simple/ASCII where possible because shell hooks, tracker filters, and external tools are easier to debug that way.
 
 ---
 
