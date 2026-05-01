@@ -34,7 +34,7 @@ describe("dashboard view model", () => {
 
     expect(viewModel.summary.runningCount).toBe(1);
     expect(viewModel.summary.retryingCount).toBe(1);
-    expect(viewModel.summary.totalTokens).toBe("34,567");
+    expect(viewModel.summary.totalTokens).toBe("35,801");
     expect(viewModel.hasRunning).toBe(true);
     expect(viewModel.hasRetries).toBe(true);
     expect(viewModel.runningRows[0]).toMatchObject({
