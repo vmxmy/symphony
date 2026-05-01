@@ -1,0 +1,70 @@
+---
+# Rename to WORKFLOW.md after copying.
+# UTF-8 prompt bodies are supported by the TypeScript engine. Keep
+# operational keys/state names simple because shell hooks and tracker
+# filters are easier to debug that way.
+
+tracker:
+  kind: linear
+  project_slug: "<your-project-slug>"
+  active_states:
+    - Todo
+    - "In Progress"
+  terminal_states:
+    - Done
+    - Cancelled
+    - Canceled
+
+polling:
+  interval_ms: 8000
+
+workspace:
+  root: ~/symphony-<your>-workspaces
+
+hooks:
+  after_create: |
+    mkdir -p input output
+  before_remove: |
+    ARCHIVE_ROOT="$HOME/symphony-<your>-archive"
+    mkdir -p "$ARCHIVE_ROOT/$(basename "$PWD")-$(date +%Y%m%d-%H%M%S)"
+    cp -r . "$ARCHIVE_ROOT/$(basename "$PWD")-$(date +%Y%m%d-%H%M%S)/" 2>/dev/null || true
+
+agent:
+  max_concurrent_agents: 2
+  max_turns: 15
+
+codex:
+  command: codex --dangerously-bypass-approvals-and-sandbox --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+  approval_policy: never
+  thread_sandbox: danger-full-access
+  turn_sandbox_policy:
+    type: dangerFullAccess
+---
+
+# <Pipeline Name> Agent
+
+You are working on Linear ticket: {{ issue.identifier }}
+Current state: {{ issue.state }}
+URL: {{ issue.url }}
+
+{% if attempt %}
+This is continuation attempt #{{ attempt }}. First action: read the most
+recent 5 comments via linear_graphql before continuing.
+{% endif %}
+
+## Issue content rule
+
+The rendered prompt includes the stable ticket identifier and state. Fetch the
+latest title, description, labels, and comments through tracker tools when the
+current stage depends on fresh issue content.
+
+## Your workflow
+
+(Define the pipeline stages here. See profiles/content-wechat/WORKFLOW.md for
+a full Tier-2 editorial pipeline example.)
+
+## Hard constraints
+
+- NEVER write outside the workspace cwd
+- On any tool error: post error in comment, KEEP state unchanged, end turn
+- On continuation (attempt > 1) MUST read comments first via linear_graphql
