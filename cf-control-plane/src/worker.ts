@@ -1,7 +1,7 @@
 // Symphony control-plane Worker entrypoint.
 //
-// Phase 2 first HTTP surface. Read-only routes that aggregate state from D1
-// for the dashboard and operator API.
+// HTTP surface for the Cloudflare-native control plane. Dashboard/read APIs
+// aggregate D1 read models; mutating routes call Durable Object agents.
 //
 // Auth model in this commit: a single shared bearer token kept in the Worker
 // secret OPERATOR_TOKEN. This is a placeholder for the proper Cloudflare
@@ -10,22 +10,25 @@
 // application is configured. Public routes (`/` banner, `/api/v1/healthz`)
 // are deliberately unauthenticated.
 //
-// All non-trivial routes touch D1 only — no Agents, no Workflows, no Queues
-// in this commit. TenantAgent / ProjectAgent skeletons land in the next
-// commit.
+// Real Cloudflare Access JWT validation lands later; route handlers already
+// authorize against an operator-principal shim so the auth provider can swap
+// without changing each route.
 
 import { TenantAgent } from "./agents/tenant.js";
 import { ProjectAgent } from "./agents/project.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard } from "./dashboard/render.js";
+import type { DashboardState, ProfileView, TenantView } from "./dashboard/render.js";
 import {
-  getSession,
+  authenticateOperator,
+  requireCapability,
   sessionCookieHeader,
   sessionClearCookieHeader,
-} from "./dashboard/auth.js";
+} from "./auth/operator.js";
 import { LinearGraphqlClient } from "./tracker/linear.js";
 import type { LinearTrackerConfig } from "./tracker/types.js";
 import { extractLinearTrackerConfig } from "./tracker/config.js";
+import { assertControlPlaneId, durableObjectName } from "./identity.js";
 
 export { TenantAgent, ProjectAgent };
 
@@ -42,12 +45,12 @@ interface Env {
 }
 
 function tenantAgentFor(env: Env, tenantId: string) {
-  const id = env.TENANT_AGENT.idFromName(`tenant:${tenantId}`);
+  const id = env.TENANT_AGENT.idFromName(durableObjectName("tenant", tenantId));
   return env.TENANT_AGENT.get(id);
 }
 
 function projectAgentFor(env: Env, tenantId: string, slug: string) {
-  const id = env.PROJECT_AGENT.idFromName(`project:${tenantId}:${slug}`);
+  const id = env.PROJECT_AGENT.idFromName(durableObjectName("project", tenantId, slug));
   return env.PROJECT_AGENT.get(id);
 }
 
@@ -60,6 +63,8 @@ type TenantRow = {
   updated_at: string;
   archived_at: string | null;
 };
+
+type TenantPolicy = { maxProjects?: number; maxRunningIssues?: number };
 
 type ProfileRow = {
   id: string;
@@ -88,14 +93,6 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-function unauthorized(reason: string): Response {
-  return jsonResponse({ error: "unauthorized", reason }, { status: 401 });
-}
-
-function forbidden(reason: string): Response {
-  return jsonResponse({ error: "forbidden", reason }, { status: 403 });
-}
-
 function notFound(): Response {
   return jsonResponse({ error: "not_found" }, { status: 404 });
 }
@@ -107,24 +104,6 @@ function methodNotAllowed(allowed: string[]): Response {
   );
 }
 
-/**
- * Bearer-token gate. Fails closed if OPERATOR_TOKEN is missing.
- * Constant-time comparison via crypto.subtle.timingSafeEqual is overkill
- * for a placeholder; simple equality is fine here and the doc note
- * explains the eventual Access swap.
- */
-function checkAuth(req: Request, env: Env): Response | null {
-  if (!env.OPERATOR_TOKEN) {
-    return forbidden("OPERATOR_TOKEN is not configured on this Worker");
-  }
-  const auth = req.headers.get("authorization") ?? "";
-  const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (!m) return unauthorized("missing or malformed Authorization: Bearer <token>");
-  const presented = m[1] ?? "";
-  if (presented !== env.OPERATOR_TOKEN) return unauthorized("token does not match");
-  return null;
-}
-
 function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   if (!raw) return fallback;
   try {
@@ -134,7 +113,7 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
-async function listTenants(env: Env): Promise<unknown[]> {
+async function listTenants(env: Env): Promise<TenantView[]> {
   const { results } = await env.DB.prepare(
     `SELECT id, name, status, policy_json, created_at, updated_at, archived_at
        FROM tenants
@@ -145,13 +124,13 @@ async function listTenants(env: Env): Promise<unknown[]> {
     id: row.id,
     name: row.name,
     status: row.status,
-    policy: safeJsonParse<unknown>(row.policy_json, {}),
+    policy: safeJsonParse<TenantPolicy>(row.policy_json, {}),
     created_at: row.created_at,
     updated_at: row.updated_at,
   }));
 }
 
-async function listProfiles(env: Env): Promise<unknown[]> {
+async function listProfiles(env: Env): Promise<ProfileView[]> {
   const { results } = await env.DB.prepare(
     `SELECT id, tenant_id, slug, active_version, tracker_kind, runtime_kind,
             status, source_schema_version, imported_schema_version,
@@ -188,6 +167,46 @@ async function probeDbReady(env: Env): Promise<{ ok: boolean; message?: string }
   }
 }
 
+async function readiness(env: Env): Promise<{ ready: boolean; db: { ok: boolean; message?: string }; operatorToken: boolean }> {
+  const db = await probeDbReady(env);
+  const operatorToken = Boolean(env.OPERATOR_TOKEN);
+  return { ready: db.ok && operatorToken, db, operatorToken };
+}
+
+async function loadDashboardState(env: Env): Promise<DashboardState> {
+  const [tenants, profiles, runsRes, issuesRes] = await Promise.all([
+    listTenants(env),
+    listProfiles(env),
+    env.DB.prepare(
+      `SELECT r.id, r.issue_id, r.attempt, r.status, r.adapter_kind,
+              r.started_at, r.finished_at, r.error, r.token_usage_json,
+              i.identifier AS issue_identifier
+         FROM runs r
+         LEFT JOIN issues i ON i.id = r.issue_id
+        WHERE r.archived_at IS NULL
+        ORDER BY r.started_at DESC
+        LIMIT 20`,
+    ).all<NonNullable<DashboardState["runs"]>[number]>(),
+    env.DB.prepare(
+      `SELECT i.id, i.identifier, i.title, i.state, i.url,
+              i.last_seen_at, p.slug AS profile_slug
+         FROM issues i
+         LEFT JOIN profiles p ON p.id = i.profile_id
+        WHERE i.archived_at IS NULL
+        ORDER BY i.last_seen_at DESC
+        LIMIT 50`,
+    ).all<NonNullable<DashboardState["issues"]>[number]>(),
+  ]);
+
+  return {
+    generated_at: new Date().toISOString(),
+    tenants,
+    profiles,
+    runs: runsRes.results ?? [],
+    issues: issuesRes.results ?? [],
+  };
+}
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -195,72 +214,65 @@ export default {
     // ---- public routes (no auth) ----
     if (req.method === "GET" && url.pathname === "/") {
       return new Response(
-        "symphony-control-plane: GET /api/v1/healthz | /api/v1/state | " +
-          "/api/v1/tenants | /api/v1/profiles\n",
+        "symphony-control-plane: GET /api/v1/healthz | /api/v1/readyz | " +
+          "/api/v1/state | /api/v1/tenants | /api/v1/profiles | /dashboard\n",
         { status: 200, headers: { "content-type": "text/plain; charset=utf-8" } },
       );
     }
 
     if (url.pathname === "/api/v1/healthz") {
       if (req.method !== "GET") return methodNotAllowed(["GET"]);
-      const db = await probeDbReady(env);
-      const status = db.ok ? 200 : 503;
+      const { ready, db, operatorToken } = await readiness(env);
+      if (!db.ok) console.error(`[healthz] db probe failed: ${db.message ?? "unknown"}`);
       return jsonResponse(
-        { status: db.ok ? "ok" : "degraded", db: db.ok ? "ok" : "down", message: db.message ?? null },
-        { status },
+        {
+          status: ready ? "ok" : "degraded",
+          checks: {
+            db: db.ok ? "ok" : "down",
+            operator_token: operatorToken ? "configured" : "missing",
+          },
+        },
+        { status: ready ? 200 : 503 },
+      );
+    }
+
+    if (url.pathname === "/api/v1/readyz") {
+      if (req.method !== "GET") return methodNotAllowed(["GET"]);
+      const { ready, db, operatorToken } = await readiness(env);
+      if (!db.ok) console.error(`[readyz] db probe failed: ${db.message ?? "unknown"}`);
+      return jsonResponse(
+        {
+          status: ready ? "ok" : "degraded",
+          checks: {
+            db: db.ok ? "ok" : "down",
+            operator_token: operatorToken ? "configured" : "missing",
+          },
+        },
+        { status: ready ? 200 : 503 },
       );
     }
 
     if (url.pathname === "/dashboard") {
       if (req.method !== "GET") return methodNotAllowed(["GET"]);
-      if (!env.OPERATOR_TOKEN) return forbidden("OPERATOR_TOKEN is not configured on this Worker");
-      const session = getSession(req, env.OPERATOR_TOKEN);
-      if (!session) {
-        return new Response(
-          "401 unauthorized — supply Authorization: Bearer <token> or visit /dashboard?token=<token> once.",
-          { status: 401, headers: { "content-type": "text/plain; charset=utf-8" } },
-        );
-      }
+      const session = await authenticateOperator(req, env.OPERATOR_TOKEN, {
+        allowCookie: true,
+        allowQuery: true,
+        jsonErrors: false,
+      });
+      if (!session.ok) return session.response;
+      const denied = requireCapability(session.principal, "read:dashboard");
+      if (denied) return denied;
       // First-touch query path: upgrade to cookie + clean URL.
-      if (session.source === "query") {
+      if (session.principal.sessionSource === "query") {
         return new Response(null, {
           status: 302,
           headers: {
             location: "/dashboard",
-            "set-cookie": sessionCookieHeader(session.token),
+            "set-cookie": await sessionCookieHeader(env.OPERATOR_TOKEN!),
           },
         });
       }
-      const [tenants, profiles, runsRes, issuesRes] = await Promise.all([
-        listTenantsWithAgentState(env),
-        listProfilesWithAgentState(env),
-        env.DB.prepare(
-          `SELECT r.id, r.issue_id, r.attempt, r.status, r.adapter_kind,
-                  r.started_at, r.finished_at, r.error, r.token_usage_json,
-                  i.identifier AS issue_identifier
-             FROM runs r
-             LEFT JOIN issues i ON i.id = r.issue_id
-            WHERE r.archived_at IS NULL
-            ORDER BY r.started_at DESC
-            LIMIT 20`,
-        ).all<Record<string, unknown>>(),
-        env.DB.prepare(
-          `SELECT i.id, i.identifier, i.title, i.state, i.url,
-                  i.last_seen_at, p.slug AS profile_slug
-             FROM issues i
-             LEFT JOIN profiles p ON p.id = i.profile_id
-            WHERE i.archived_at IS NULL
-            ORDER BY i.last_seen_at DESC
-            LIMIT 50`,
-        ).all<Record<string, unknown>>(),
-      ]);
-      const html = renderDashboard({
-        generated_at: new Date().toISOString(),
-        tenants: tenants as Parameters<typeof renderDashboard>[0]["tenants"],
-        profiles: profiles as Parameters<typeof renderDashboard>[0]["profiles"],
-        runs: (runsRes.results ?? []) as Parameters<typeof renderDashboard>[0]["runs"],
-        issues: (issuesRes.results ?? []) as Parameters<typeof renderDashboard>[0]["issues"],
-      });
+      const html = renderDashboard(await loadDashboardState(env));
       return new Response(html, {
         status: 200,
         headers: { "content-type": "text/html; charset=utf-8" },
@@ -279,15 +291,15 @@ export default {
 
     // ---- gated routes ----
     if (url.pathname.startsWith("/api/v1/")) {
-      const denial = checkAuth(req, env);
-      if (denial) return denial;
+      const auth = await authenticateOperator(req, env.OPERATOR_TOKEN);
+      if (!auth.ok) return auth.response;
+      const { principal } = auth;
 
       if (url.pathname === "/api/v1/state") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        const [tenants, profiles] = await Promise.all([
-          listTenantsWithAgentState(env),
-          listProfilesWithAgentState(env),
-        ]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        const [tenants, profiles] = await Promise.all([listTenants(env), listProfiles(env)]);
         return jsonResponse({
           generated_at: new Date().toISOString(),
           tenants,
@@ -297,12 +309,16 @@ export default {
 
       if (url.pathname === "/api/v1/tenants") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        return jsonResponse({ tenants: await listTenantsWithAgentState(env) });
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        return jsonResponse({ tenants: await listTenants(env) });
       }
 
       if (url.pathname === "/api/v1/profiles") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        return jsonResponse({ profiles: await listProfilesWithAgentState(env) });
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        return jsonResponse({ profiles: await listProfiles(env) });
       }
 
       // ---- operator transition routes -------------------------------
@@ -312,6 +328,13 @@ export default {
       if (tenantAction) {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
         const [, tenantId, action] = tenantAction;
+        const denied = requireCapability(principal, "write:tenant.transition");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_tenant_id", message: String((e as Error).message) }, { status: 400 });
+        }
         const decidedBy = req.headers.get("x-symphony-operator") ?? null;
         const reason = req.headers.get("x-symphony-reason") ?? undefined;
         try {
@@ -333,6 +356,14 @@ export default {
       if (trackerProbe) {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
         const [, tenantId, slug, kind] = trackerProbe;
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_profile_id", message: String((e as Error).message) }, { status: 400 });
+        }
         const cfg = await loadLinearTrackerConfig(env, tenantId!, slug!);
         if (!cfg.ok) {
           return jsonResponse(
@@ -368,13 +399,31 @@ export default {
       if (mockRun) {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
         const [, tenantId, slug, identifier] = mockRun;
+        const denied = requireCapability(principal, "write:run.mock");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+          assertControlPlaneId("issue", identifier!);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_mock_run_id", message: String((e as Error).message) }, { status: 400 });
+        }
         const profileRow = await env.DB.prepare(
-          `SELECT id, tenant_id, slug FROM profiles WHERE tenant_id = ? AND slug = ?`,
+          `SELECT p.id, p.tenant_id, p.slug, p.status, t.status AS tenant_status
+             FROM profiles p
+             JOIN tenants t ON t.id = p.tenant_id AND t.archived_at IS NULL
+            WHERE p.tenant_id = ? AND p.slug = ? AND p.archived_at IS NULL`,
         )
           .bind(tenantId!, slug!)
-          .first<{ id: string; tenant_id: string; slug: string }>();
+          .first<{ id: string; tenant_id: string; slug: string; status: string; tenant_status: string }>();
         if (!profileRow) {
           return jsonResponse({ error: "profile_not_found", tenant: tenantId, slug }, { status: 404 });
+        }
+        if (profileRow.tenant_status !== "active") {
+          return jsonResponse({ error: "tenant_not_active", status: profileRow.tenant_status }, { status: 409 });
+        }
+        if (profileRow.status !== "active") {
+          return jsonResponse({ error: "project_not_active", status: profileRow.status }, { status: 409 });
         }
         const result = await executeMockRun(env, {
           profile: profileRow,
@@ -387,8 +436,10 @@ export default {
       const runDetail = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)$/);
       if (runDetail) {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
         const runId = runDetail[1]!;
-        const [run, events, toolCalls] = await Promise.all([
+        const [run, steps, events, toolCalls] = await Promise.all([
           env.DB.prepare(
             `SELECT id, issue_id, attempt, status, adapter_kind,
                     started_at, finished_at, error, token_usage_json
@@ -397,14 +448,20 @@ export default {
             .bind(runId)
             .first<Record<string, unknown>>(),
           env.DB.prepare(
-            `SELECT id, event_type, severity, message, created_at
-               FROM run_events WHERE run_id = ? ORDER BY created_at`,
+            `SELECT id, step_name, step_sequence, status, started_at, finished_at, input_ref, output_ref, error
+               FROM run_steps WHERE run_id = ? AND archived_at IS NULL ORDER BY step_sequence`,
           )
             .bind(runId)
             .all(),
           env.DB.prepare(
-            `SELECT id, turn_number, tool_name, status, started_at, finished_at
-               FROM tool_calls WHERE run_id = ? ORDER BY started_at`,
+            `SELECT id, event_type, severity, message, payload_ref, created_at
+               FROM run_events WHERE run_id = ? AND archived_at IS NULL ORDER BY created_at`,
+          )
+            .bind(runId)
+            .all(),
+          env.DB.prepare(
+            `SELECT id, turn_number, tool_name, status, input_ref, output_ref, started_at, finished_at
+               FROM tool_calls WHERE run_id = ? AND archived_at IS NULL ORDER BY started_at`,
           )
             .bind(runId)
             .all(),
@@ -415,6 +472,7 @@ export default {
             ...run,
             token_usage: safeJsonParse<unknown>(run.token_usage_json as string | null, null),
           },
+          steps: steps.results ?? [],
           events: events.results ?? [],
           tool_calls: toolCalls.results ?? [],
         });
@@ -422,6 +480,8 @@ export default {
 
       if (url.pathname === "/api/v1/runs") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
         const { results } = await env.DB.prepare(
           `SELECT r.id AS id, r.issue_id, r.attempt, r.status, r.adapter_kind,
                   r.started_at, r.finished_at, r.error, r.token_usage_json,
@@ -442,6 +502,14 @@ export default {
       if (refresh) {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
         const [, tenantId, slug] = refresh;
+        const denied = requireCapability(principal, "write:project.refresh");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_profile_id", message: String((e as Error).message) }, { status: 400 });
+        }
         try {
           const stub = projectAgentFor(env, tenantId!, slug!);
           const result = await stub.poll(tenantId!, slug!);
@@ -450,6 +518,10 @@ export default {
           const msg = String((e as Error).message);
           const status =
             msg.startsWith("profile_not_found") ? 404
+            : msg.startsWith("tenant_not_found") ? 404
+            : msg.startsWith("project_not_found") ? 404
+            : msg.startsWith("tenant_not_active") ? 409
+            : msg.startsWith("project_not_active") ? 409
             : msg.startsWith("linear_api_key_unset") ? 500
             : msg.startsWith("tracker_kind_unsupported") ? 400
             : msg.startsWith("tracker_config_incomplete") ? 500
@@ -464,6 +536,14 @@ export default {
       if (projectAction) {
         if (req.method !== "POST") return methodNotAllowed(["POST"]);
         const [, tenantId, slug, action] = projectAction;
+        const denied = requireCapability(principal, "write:project.transition");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_profile_id", message: String((e as Error).message) }, { status: 400 });
+        }
         const decidedBy = req.headers.get("x-symphony-operator") ?? null;
         const reason = req.headers.get("x-symphony-reason") ?? undefined;
         try {
@@ -552,32 +632,4 @@ function shapeIssueForDebug(issue: {
     title: issue.title,
     url: issue.url,
   };
-}
-
-async function listTenantsWithAgentState(env: Env) {
-  const base = (await listTenants(env)) as Array<{ id: string; [k: string]: unknown }>;
-  return Promise.all(
-    base.map(async (t) => {
-      try {
-        const hot = await tenantAgentFor(env, t.id).getStatus(t.id);
-        return { ...t, agent: hot };
-      } catch (e) {
-        return { ...t, agent_error: String((e as Error).message) };
-      }
-    }),
-  );
-}
-
-async function listProfilesWithAgentState(env: Env) {
-  const base = (await listProfiles(env)) as Array<{ tenant_id: string; slug: string; [k: string]: unknown }>;
-  return Promise.all(
-    base.map(async (p) => {
-      try {
-        const hot = await projectAgentFor(env, p.tenant_id, p.slug).getStatus(p.tenant_id, p.slug);
-        return { ...p, agent: hot };
-      } catch (e) {
-        return { ...p, agent_error: String((e as Error).message) };
-      }
-    }),
-  );
 }

@@ -5,7 +5,7 @@
 // ts-engine/src/dashboard/render.ts: small inline CSS, escaped values,
 // table-per-section layout.
 
-type TenantView = {
+export type TenantView = {
   id: string;
   name: string;
   status: string;
@@ -16,7 +16,7 @@ type TenantView = {
   updated_at: string;
 };
 
-type ProfileView = {
+export type ProfileView = {
   id: string;
   tenant_id: string;
   slug: string;
@@ -25,6 +25,7 @@ type ProfileView = {
   runtime_kind: string;
   status: string;
   source_schema_version: number;
+  imported_schema_version: number;
   defaults_applied: string[];
   warnings: string[];
   imported_at?: string | null;
@@ -32,7 +33,7 @@ type ProfileView = {
   agent_error?: string;
 };
 
-type RunView = {
+export type RunView = {
   id: string;
   issue_id: string;
   issue_identifier?: string | null;
@@ -45,7 +46,7 @@ type RunView = {
   token_usage_json?: string | null;
 };
 
-type IssueView = {
+export type IssueView = {
   id: string;
   identifier: string;
   title: string | null;
@@ -55,7 +56,7 @@ type IssueView = {
   profile_slug?: string | null;
 };
 
-type DashboardState = {
+export type DashboardState = {
   generated_at: string;
   tenants: TenantView[];
   profiles: ProfileView[];
@@ -127,7 +128,7 @@ function profilesTable(profiles: ProfileView[]): string {
           <td>${statusCell(p.status, p.agent, p.agent_error)}</td>
           <td>${escape(p.tracker_kind)}</td>
           <td>${escape(p.runtime_kind)}</td>
-          <td>v${escape(p.source_schema_version)} -> v2</td>
+          <td>v${escape(p.source_schema_version)} -> v${escape(p.imported_schema_version)}</td>
           <td>${defaults}</td>
           <td>${warnings}</td>
           <td><time>${escape(p.imported_at ?? "-")}</time></td>
@@ -283,7 +284,7 @@ export function renderDashboard(state: DashboardState): string {
   </section>
 
   <footer>
-    <span>D1 status mirrored from agent hot state on transition. If the two columns disagree, agent wins.</span>
+    <span>Dashboard reads D1 only; Durable Object state is touched only by explicit mutation/refresh routes.</span>
     <span><a href="/logout">log out</a></span>
   </footer>
 </body>

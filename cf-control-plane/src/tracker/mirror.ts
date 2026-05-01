@@ -1,8 +1,8 @@
 // Mirror tracker-fetched issues into the D1 issues table.
 //
 // UPSERT semantics:
-//   - Deterministic row id `${profileId}:${issue.identifier}` (matches the
-//     id format used by orchestration/mock_run.ts).
+//   - Deterministic row id `${profileId}:${issue.id}` so tracker-side stable
+//     identity survives human-readable identifier renames.
 //   - INSERT path sets first_seen_at AND last_seen_at to `now`.
 //   - UPDATE path bumps last_seen_at always; updates state / title / url /
 //     priority / snapshot_json only when changed; clears archived_at if
@@ -30,18 +30,19 @@ export async function mirrorIssues(
   const stats: MirrorStats = { inserted: 0, updated: 0, unchanged: 0 };
 
   for (const issue of issues) {
-    const id = `${profileId}:${issue.identifier}`;
+    const id = `${profileId}:${issue.id}`;
     const snapshot = JSON.stringify(issue);
 
     const existing = await db
       .prepare(
-        `SELECT state, title, url, priority, snapshot_json
+          `SELECT identifier, state, title, url, priority, snapshot_json
            FROM issues
           WHERE id = ?`,
       )
       .bind(id)
       .first<{
         state: string;
+        identifier: string;
         title: string | null;
         url: string | null;
         priority: number | null;
@@ -80,6 +81,7 @@ export async function mirrorIssues(
 
     const changed =
       existing.state !== issue.state ||
+      existing.identifier !== issue.identifier ||
       existing.title !== issue.title ||
       existing.url !== issue.url ||
       existing.priority !== issue.priority ||
@@ -89,12 +91,13 @@ export async function mirrorIssues(
       await db
         .prepare(
           `UPDATE issues
-              SET state = ?, title = ?, url = ?, priority = ?,
+              SET identifier = ?, state = ?, title = ?, url = ?, priority = ?,
                   snapshot_json = ?, last_seen_at = ?, updated_at = ?,
                   archived_at = NULL
             WHERE id = ?`,
         )
         .bind(
+          issue.identifier,
           issue.state,
           issue.title,
           issue.url,

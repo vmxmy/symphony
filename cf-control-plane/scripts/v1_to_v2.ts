@@ -9,8 +9,7 @@
 // can be reused by:
 //   - scripts/import-profile.ts (the operator CLI in this commit),
 //   - the future Worker-side import endpoint,
-//   - unit tests (none yet; first hardening target after the importer
-//     proves itself end-to-end).
+//   - unit tests.
 
 export type V1ProfileYaml = {
   name?: string;
@@ -79,6 +78,12 @@ export type ImportRecord = {
   v2: V2NormalizedConfig;
 };
 
+function parseSourceSchemaVersion(raw: unknown): 1 | 2 {
+  const version = raw ?? 1;
+  if (version === 1 || version === 2) return version;
+  throw new Error(`unsupported source schema_version: ${String(version)} (expected 1 or 2)`);
+}
+
 /**
  * Pure upgrade. Inputs are JSON-parsed objects; output is the v2 normalized
  * config plus the bookkeeping metadata. Does not perform any side effects.
@@ -93,7 +98,7 @@ export function upgradeV1ToV2(input: {
   const defaults_applied: string[] = [];
   const warnings: string[] = [];
 
-  const sourceSchema = (wfm.schema_version ?? profileYaml.schema_version ?? 1) as 1 | 2;
+  const sourceSchema = parseSourceSchemaVersion(wfm.schema_version ?? profileYaml.schema_version ?? 1);
 
   // ---- runtime --------------------------------------------------------
   let runtimeKind = wfm.runtime?.kind;
@@ -189,6 +194,12 @@ export function upgradeV1ToV2(input: {
   }
   if (profileYaml.preflight) {
     warnings.push("profile.yaml preflight.* is launcher-only; not represented in v2 control-plane config");
+  }
+  if (wfm.hooks && Object.keys(wfm.hooks).length > 0) {
+    warnings.push("WORKFLOW.md hooks are imported for audit only; Cloudflare-native execution requires explicit WorkerHost substitutes");
+  }
+  if (JSON.stringify(wfm.codex ?? {}).includes("danger")) {
+    warnings.push("WORKFLOW.md codex settings include danger/full-access controls; Cloudflare runtime will enforce its own sandbox policy");
   }
 
   const v2: V2NormalizedConfig = {

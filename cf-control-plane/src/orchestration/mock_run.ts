@@ -41,6 +41,13 @@ const MOCK_TURN_EVENTS = [
   { type: "workflow.completed", severity: "info" as const, message: "mock workflow completed" },
 ];
 
+const MOCK_STEPS = [
+  "prepareWorkspace",
+  "beforeRunHook",
+  "runAgentTurn",
+  "afterRunHook",
+];
+
 export type MockRunInput = {
   profile: Profile;
   issueIdentifier: string;
@@ -62,6 +69,7 @@ export async function executeMockRun(
   const issueId = `${input.profile.id}:${input.issueIdentifier}`;
   const runId = crypto.randomUUID();
   const toolCallId = crypto.randomUUID();
+  let openedRun = false;
 
   // 1. Ensure the issue row exists (deterministic id; rerun = same row).
   await env.DB.prepare(
@@ -97,66 +105,93 @@ export async function executeMockRun(
     .bind(startedAtIso, startedAtIso, issueId)
     .run();
 
-  // 2. Compute next attempt for this issue.
-  const attemptRow = await env.DB.prepare(
-    `SELECT COALESCE(MAX(attempt), 0) + 1 AS next FROM runs WHERE issue_id = ?`,
-  )
-    .bind(issueId)
-    .first<{ next: number }>();
-  const attempt = attemptRow?.next ?? 1;
-
-  // 3. Open the run.
+  // 2. Open the run and allocate attempt in one statement.
   await env.DB.prepare(
     `INSERT INTO runs (
        id, issue_id, attempt, status, workflow_id, adapter_kind,
        workspace_ref, started_at, finished_at, error,
        token_usage_json, artifact_manifest_ref
-     ) VALUES (?, ?, ?, 'running', NULL, 'mock', NULL, ?, NULL, NULL, NULL, NULL)`,
+     )
+     SELECT ?, ?, COALESCE(MAX(attempt), 0) + 1, 'running', NULL, 'mock',
+            NULL, ?, NULL, NULL, NULL, NULL
+       FROM runs
+      WHERE issue_id = ?`,
   )
-    .bind(runId, issueId, attempt, startedAtIso)
+    .bind(runId, issueId, startedAtIso, issueId)
     .run();
+  openedRun = true;
 
-  // 4. Emit the canonical mock event sequence.
-  let eventsEmitted = 0;
-  for (let i = 0; i < MOCK_TURN_EVENTS.length; i++) {
-    const ev = MOCK_TURN_EVENTS[i]!;
-    const ts = new Date(startedAt.getTime() + (i + 1) * 50).toISOString();
-    await env.DB.prepare(
-      `INSERT INTO run_events (id, run_id, issue_id, event_type, severity, message, payload_ref, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+  try {
+    const attemptRow = await env.DB.prepare(
+      `SELECT attempt FROM runs WHERE id = ?`,
     )
-      .bind(crypto.randomUUID(), runId, issueId, ev.type, ev.severity, ev.message, ts)
+      .bind(runId)
+      .first<{ attempt: number }>();
+    if (!attemptRow) throw new Error("mock_run_attempt_missing");
+    const attempt = attemptRow.attempt;
+
+    // 3. Emit step rows and the canonical mock event sequence.
+    for (let i = 0; i < MOCK_STEPS.length; i++) {
+      const step = MOCK_STEPS[i]!;
+      const ts = new Date(startedAt.getTime() + (i + 1) * 75).toISOString();
+      await env.DB.prepare(
+        `INSERT INTO run_steps (id, run_id, step_name, step_sequence, status, started_at, finished_at, input_ref, output_ref, error)
+         VALUES (?, ?, ?, ?, 'completed', ?, ?, NULL, NULL, NULL)`,
+      )
+        .bind(crypto.randomUUID(), runId, step, i + 1, ts, ts)
+        .run();
+    }
+
+    let eventsEmitted = 0;
+    for (let i = 0; i < MOCK_TURN_EVENTS.length; i++) {
+      const ev = MOCK_TURN_EVENTS[i]!;
+      const ts = new Date(startedAt.getTime() + (i + 1) * 50).toISOString();
+      await env.DB.prepare(
+        `INSERT INTO run_events (id, run_id, issue_id, event_type, severity, message, payload_ref, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`,
+      )
+        .bind(crypto.randomUUID(), runId, issueId, ev.type, ev.severity, ev.message, ts)
+        .run();
+      eventsEmitted++;
+    }
+
+    // 4. Audit the simulated tool call.
+    const toolStartIso = new Date(startedAt.getTime() + 200).toISOString();
+    const toolEndIso = new Date(startedAt.getTime() + 250).toISOString();
+    await env.DB.prepare(
+      `INSERT INTO tool_calls (id, run_id, turn_number, tool_name, status, input_ref, output_ref, approval_id, started_at, finished_at)
+       VALUES (?, ?, 1, 'linear_graphql', 'completed', 'mock://input', 'mock://output', NULL, ?, ?)`,
+    )
+      .bind(toolCallId, runId, toolStartIso, toolEndIso)
       .run();
-    eventsEmitted++;
+
+    // 5. Close the run.
+    const finishedAtIso = new Date(startedAt.getTime() + 600).toISOString();
+    const tokenUsage = { totalTokens: 100, inputTokens: 60, outputTokens: 40, secondsRunning: 1 };
+    await env.DB.prepare(
+      `UPDATE runs
+          SET status = 'completed', finished_at = ?, token_usage_json = ?
+        WHERE id = ?`,
+    )
+      .bind(finishedAtIso, JSON.stringify(tokenUsage), runId)
+      .run();
+
+    return {
+      issue_id: issueId,
+      run_id: runId,
+      attempt,
+      status: "completed",
+      events_emitted: eventsEmitted,
+      duration_ms: 600,
+    };
+  } catch (e) {
+    if (openedRun) {
+      await env.DB.prepare(
+        `UPDATE runs SET status = 'failed', finished_at = ?, error = ? WHERE id = ?`,
+      )
+        .bind(new Date().toISOString(), String((e as Error).message ?? e), runId)
+        .run();
+    }
+    throw e;
   }
-
-  // 5. Audit the simulated tool call.
-  const toolStartIso = new Date(startedAt.getTime() + 200).toISOString();
-  const toolEndIso = new Date(startedAt.getTime() + 250).toISOString();
-  await env.DB.prepare(
-    `INSERT INTO tool_calls (id, run_id, turn_number, tool_name, status, input_ref, output_ref, approval_id, started_at, finished_at)
-     VALUES (?, ?, 1, 'linear_graphql', 'completed', 'mock://input', 'mock://output', NULL, ?, ?)`,
-  )
-    .bind(toolCallId, runId, toolStartIso, toolEndIso)
-    .run();
-
-  // 6. Close the run.
-  const finishedAtIso = new Date(startedAt.getTime() + 600).toISOString();
-  const tokenUsage = { totalTokens: 100, inputTokens: 60, outputTokens: 40, secondsRunning: 1 };
-  await env.DB.prepare(
-    `UPDATE runs
-        SET status = 'completed', finished_at = ?, token_usage_json = ?
-      WHERE id = ?`,
-  )
-    .bind(finishedAtIso, JSON.stringify(tokenUsage), runId)
-    .run();
-
-  return {
-    issue_id: issueId,
-    run_id: runId,
-    attempt,
-    status: "completed",
-    events_emitted: eventsEmitted,
-    duration_ms: 600,
-  };
 }

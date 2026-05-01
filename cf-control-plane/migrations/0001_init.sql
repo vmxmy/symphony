@@ -10,9 +10,9 @@
 --   - idempotency_records per §13.1 (gates external side effects from
 --     ExecutionWorkflow replay)
 --
--- All `CREATE` statements use IF NOT EXISTS so this migration is replay-safe
--- when wrangler reapplies on a database that already has a partial subset
--- of these tables.
+-- Tables are created without IF NOT EXISTS on purpose. This initial migration
+-- must fail loudly if a remote D1 database already has incompatible tables;
+-- use the schema validation script after applying migrations to detect drift.
 --
 -- D1 = SQLite. Notes:
 --   - JSON payloads are TEXT; decode at the application layer.
@@ -25,7 +25,7 @@
 -- ---------------------------------------------------------------------------
 -- tenants: TenantAgent ownership root.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS tenants (
+CREATE TABLE tenants (
   id              TEXT PRIMARY KEY,
   name            TEXT NOT NULL,
   status          TEXT NOT NULL CHECK (status IN ('active', 'paused', 'suspended')),
@@ -42,17 +42,17 @@ CREATE INDEX IF NOT EXISTS idx_tenants_status_active
 -- profiles: profile registry pointer + parsed v2 metadata + import bookkeeping.
 -- The canonical bundle (profile.yaml + WORKFLOW.md + skills/) lives in R2.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS profiles (
+CREATE TABLE profiles (
   id                       TEXT PRIMARY KEY,
   tenant_id                TEXT NOT NULL,
   slug                     TEXT NOT NULL,
   active_version           TEXT NOT NULL,
-  tracker_kind             TEXT NOT NULL,        -- 'linear' | 'cloudflare'
-  runtime_kind             TEXT NOT NULL,        -- 'cloudflare-agent-native' | 'local'
-  status                   TEXT NOT NULL,        -- 'active' | 'paused' | 'draining' | 'archived'
+  tracker_kind             TEXT NOT NULL CHECK (tracker_kind IN ('linear', 'cloudflare')),
+  runtime_kind             TEXT NOT NULL CHECK (runtime_kind IN ('cloudflare-agent-native', 'local')),
+  status                   TEXT NOT NULL CHECK (status IN ('active', 'paused', 'draining', 'archived')),
   config_json              TEXT NOT NULL,        -- parsed v2 operational config
-  source_schema_version    INTEGER NOT NULL,     -- 1 or 2 (per §10.1)
-  imported_schema_version  INTEGER NOT NULL,     -- always 2 after import
+  source_schema_version    INTEGER NOT NULL CHECK (source_schema_version IN (1, 2)),
+  imported_schema_version  INTEGER NOT NULL CHECK (imported_schema_version = 2),
   defaults_applied         TEXT NOT NULL,        -- JSON array of field names defaulted during import
   warnings                 TEXT,                 -- JSON array of import-time warnings
   source_bundle_ref        TEXT,                 -- R2 path to original v1/v2 bundle
@@ -74,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_profiles_status
 -- normalized Issue shape (see ts-engine/src/types.ts Issue) so the dashboard
 -- doesn't need to refetch from the tracker for read-only views.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS issues (
+CREATE TABLE issues (
   id              TEXT PRIMARY KEY,
   tenant_id       TEXT NOT NULL,
   profile_id      TEXT NOT NULL,
@@ -97,6 +97,8 @@ CREATE INDEX IF NOT EXISTS idx_issues_profile_state
   ON issues(profile_id, state) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_issues_external
   ON issues(external_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_issues_profile_external_unique
+  ON issues(profile_id, external_id) WHERE external_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_issues_last_seen
   ON issues(last_seen_at);
 
@@ -105,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_issues_last_seen
 -- IssueAgent lease + one ExecutionWorkflow instance. attempt increments on
 -- retry; workflow_id is the Cloudflare Workflows instance id.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS runs (
+CREATE TABLE runs (
   id                       TEXT PRIMARY KEY,
   issue_id                 TEXT NOT NULL,
   attempt                  INTEGER NOT NULL,
@@ -133,7 +135,7 @@ CREATE INDEX IF NOT EXISTS idx_runs_workflow
 -- run_steps: durable Workflow steps within one run (prepareWorkspace,
 -- beforeRunHook, runAgentTurn, ...). Bulky inputs/outputs live in R2.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS run_steps (
+CREATE TABLE run_steps (
   id              TEXT PRIMARY KEY,
   run_id          TEXT NOT NULL,
   step_name       TEXT NOT NULL,
@@ -143,17 +145,18 @@ CREATE TABLE IF NOT EXISTS run_steps (
   finished_at     TEXT,
   input_ref       TEXT,                 -- R2 path
   output_ref      TEXT,                 -- R2 path
-  error           TEXT
+  error           TEXT,
+  archived_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_steps_run_seq
-  ON run_steps(run_id, step_sequence);
+  ON run_steps(run_id, step_sequence) WHERE archived_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- run_events: queryable event index. Severity-keyed for fast dashboard look-up.
 -- payload_ref points to the full JSON in R2 when message is a summary only.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS run_events (
+CREATE TABLE run_events (
   id              TEXT PRIMARY KEY,
   run_id          TEXT,
   issue_id        TEXT,
@@ -161,22 +164,23 @@ CREATE TABLE IF NOT EXISTS run_events (
   severity        TEXT NOT NULL,        -- debug|info|warning|error
   message         TEXT,
   payload_ref     TEXT,                 -- R2 path for large payloads
-  created_at      TEXT NOT NULL
+  created_at      TEXT NOT NULL,
+  archived_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_events_run_time
-  ON run_events(run_id, created_at);
+  ON run_events(run_id, created_at) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_run_events_issue_time
-  ON run_events(issue_id, created_at);
+  ON run_events(issue_id, created_at) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_run_events_severity_time
-  ON run_events(severity, created_at);
+  ON run_events(severity, created_at) WHERE archived_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- tool_calls: audit log of every dynamic tool invocation through ToolGateway.
 -- input_ref is mandatory (the call envelope); output_ref is null until the
 -- call settles; approval_id links to approvals when policy gates the call.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS tool_calls (
+CREATE TABLE tool_calls (
   id              TEXT PRIMARY KEY,
   run_id          TEXT NOT NULL,
   turn_number     INTEGER,
@@ -186,21 +190,22 @@ CREATE TABLE IF NOT EXISTS tool_calls (
   output_ref      TEXT,                 -- R2 path
   approval_id     TEXT,
   started_at      TEXT NOT NULL,
-  finished_at     TEXT
+  finished_at     TEXT,
+  archived_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run
-  ON tool_calls(run_id);
+  ON tool_calls(run_id) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tool_calls_name_time
-  ON tool_calls(tool_name, started_at);
+  ON tool_calls(tool_name, started_at) WHERE archived_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_tool_calls_status
-  ON tool_calls(status, started_at);
+  ON tool_calls(status, started_at) WHERE archived_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- approvals: human-in-the-loop gate records. Bodies in R2; this table is the
 -- queryable dashboard surface for "what's waiting for me".
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS approvals (
+CREATE TABLE approvals (
   id              TEXT PRIMARY KEY,
   tenant_id       TEXT NOT NULL,
   profile_id      TEXT NOT NULL,
@@ -233,7 +238,7 @@ CREATE INDEX IF NOT EXISTS idx_approvals_tenant_status
 -- status=completed, the gateway returns the stored result_ref instead of
 -- repeating the external call.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS idempotency_records (
+CREATE TABLE idempotency_records (
   idem_key        TEXT PRIMARY KEY,
   tenant_id       TEXT NOT NULL,
   profile_id      TEXT NOT NULL,
@@ -241,7 +246,12 @@ CREATE TABLE IF NOT EXISTS idempotency_records (
   run_id          TEXT,
   tool_call_id    TEXT,                 -- originating tool_calls.id (so audit can join)
   operation_type  TEXT NOT NULL,        -- e.g. 'tracker.transition', 'github.pull_request'
-  status          TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
+  status          TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed', 'expired')),
+  lease_owner     TEXT,
+  lease_expires_at TEXT,
+  attempt_count   INTEGER NOT NULL DEFAULT 0,
+  retry_after     TEXT,
+  failure_class   TEXT,
   external_ref    TEXT,                 -- provider-side ID once known
   result_ref      TEXT,                 -- R2 path to stored result envelope
   created_at      TEXT NOT NULL,
@@ -254,6 +264,8 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_tool_call
   ON idempotency_records(tool_call_id);
 CREATE INDEX IF NOT EXISTS idx_idempotency_status_created
   ON idempotency_records(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_idempotency_lease_expires
+  ON idempotency_records(lease_expires_at) WHERE status = 'in_progress';
 
 -- ---------------------------------------------------------------------------
 -- Sanity: a SELECT that returns the table count helps wrangler exit cleanly

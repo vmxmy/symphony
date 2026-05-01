@@ -4,17 +4,18 @@
 //   bun run scripts/import-profile.ts \
 //     --profile ../profiles/content-wechat \
 //     [--tenant personal] \
-//     [--remote|--local]
+//     [--remote|--local] \
+//     [--dry-run|--apply]
 //
 // Behavior:
 //   1. Reads <profile>/profile.yaml and <profile>/WORKFLOW.md.
 //   2. Calls upgradeV1ToV2() to produce the v2 normalized config + import
 //      bookkeeping (defaults_applied, warnings).
-//   3. Generates an INSERT-OR-IGNORE for tenants and an INSERT-OR-REPLACE
-//      for profiles, written to a temp .sql file.
-//   4. Shells out to `wrangler d1 execute symphony-control-plane --file=<tmp>`
-//      with --local (default) or --remote. The wrangler binding name `DB`
-//      from wrangler.toml is what the future Worker uses.
+//   3. Generates an INSERT-OR-IGNORE for tenants and an UPSERT for profiles,
+//      written to a temp .sql file.
+//   4. Prints the plan by default. Add --apply to shell out to
+//      `wrangler d1 execute symphony-control-plane --file=<tmp>` with --local
+//      (default) or --remote.
 //   5. Prints the import-record summary so the operator can see which
 //      fields were defaulted and which warnings fired.
 //
@@ -32,24 +33,27 @@ import {
   upgradeV1ToV2,
   type V1ProfileYaml,
   type V1WorkflowFrontMatter,
-} from "./v1_to_v2.ts";
+} from "./v1_to_v2.js";
 
 type Args = {
   profilePath: string;
   tenant: string;
   target: "local" | "remote";
+  apply: boolean;
 };
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { profilePath: "", tenant: "personal", target: "local" };
+  const args: Args = { profilePath: "", tenant: "personal", target: "local", apply: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--profile") args.profilePath = argv[++i] ?? "";
     else if (a === "--tenant") args.tenant = argv[++i] ?? args.tenant;
     else if (a === "--remote") args.target = "remote";
     else if (a === "--local") args.target = "local";
+    else if (a === "--apply") args.apply = true;
+    else if (a === "--dry-run") args.apply = false;
     else if (a === "--help" || a === "-h") {
-      console.error("Usage: bun run scripts/import-profile.ts --profile <path> [--tenant <id>] [--remote|--local]");
+      console.error("Usage: bun run scripts/import-profile.ts --profile <path> [--tenant <id>] [--remote|--local] [--dry-run|--apply]");
       process.exit(0);
     } else {
       console.error(`unknown argument: ${a}`);
@@ -61,6 +65,12 @@ function parseArgs(argv: string[]): Args {
     process.exit(2);
   }
   return args;
+}
+
+function assertId(kind: string, value: string): void {
+  if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+    throw new Error(`${kind} must match [A-Za-z0-9._-]+: ${value}`);
+  }
 }
 
 function loadProfileYaml(path: string): V1ProfileYaml {
@@ -107,6 +117,8 @@ async function main() {
 
   const slug = String(profileYaml.name ?? basename(profileDir));
   const version = String(profileYaml.version ?? "0.0.0");
+  assertId("tenant", args.tenant);
+  assertId("profile slug", slug);
 
   const record = upgradeV1ToV2({
     tenant: args.tenant,
@@ -116,7 +128,7 @@ async function main() {
   });
 
   const tenantId = args.tenant;
-  const profileId = `${tenantId}/${slug}@${version}`;
+  const profileId = `${tenantId}/${slug}`;
   const now = nowIso();
 
   const trackerKind = record.v2.tracker.kind;
@@ -139,7 +151,7 @@ async function main() {
     `  ${sqlString(now)},`,
     `  ${sqlString(now)}`,
     `);`,
-    `INSERT OR REPLACE INTO profiles (`,
+    `INSERT INTO profiles (`,
     `  id, tenant_id, slug, active_version, tracker_kind, runtime_kind, status,`,
     `  config_json, source_schema_version, imported_schema_version,`,
     `  defaults_applied, warnings, source_bundle_ref, normalized_config_ref,`,
@@ -162,16 +174,37 @@ async function main() {
     `  ${sqlString(now)},`,
     `  ${sqlString(now)},`,
     `  ${sqlString(now)}`,
-    `);`,
+    `)`,
+    `ON CONFLICT(tenant_id, slug) DO UPDATE SET`,
+    `  active_version = excluded.active_version,`,
+    `  tracker_kind = excluded.tracker_kind,`,
+    `  runtime_kind = excluded.runtime_kind,`,
+    `  config_json = excluded.config_json,`,
+    `  source_schema_version = excluded.source_schema_version,`,
+    `  imported_schema_version = excluded.imported_schema_version,`,
+    `  defaults_applied = excluded.defaults_applied,`,
+    `  warnings = excluded.warnings,`,
+    `  source_bundle_ref = excluded.source_bundle_ref,`,
+    `  normalized_config_ref = excluded.normalized_config_ref,`,
+    `  imported_at = excluded.imported_at,`,
+    `  updated_at = excluded.updated_at;`,
   ].join("\n");
 
   const tmpDir = mkdtempSync(join(tmpdir(), "symphony-import-"));
   const tmpFile = join(tmpDir, "insert.sql");
   writeFileSync(tmpFile, sql, "utf8");
 
-  console.error(`[import] tenant=${tenantId} slug=${slug} version=${version} target=${args.target}`);
+  console.error(`[import] tenant=${tenantId} slug=${slug} version=${version} target=${args.target} mode=${args.apply ? "apply" : "dry-run"}`);
   console.error(`[import] defaults_applied=${JSON.stringify(record.defaults_applied)}`);
   console.error(`[import] warnings=${JSON.stringify(record.warnings)}`);
+  console.error("[import] WARN R2 source_bundle_ref/normalized_config_ref upload is deferred; SQL writes NULL refs");
+
+  if (!args.apply) {
+    console.log(sql);
+    rmSync(tmpDir, { recursive: true, force: true });
+    console.error(`[import] dry-run OK; profile_id=${profileId}`);
+    return;
+  }
 
   const targetFlag = args.target === "remote" ? "--remote" : "--local";
   const result = spawnSync(

@@ -12,13 +12,14 @@
 //   - every transition mirrors to D1 `tenants.status` so dashboard
 //     reads stay consistent and so CLI ops can see status without
 //     hitting the agent
-//   - DO is the source of truth for transition correctness; D1 is
-//     the queryable index. If they diverge, DO wins.
+//   - D1 is the identity registry; missing/archived rows are rejected before
+//     DO state is initialized.
 //
 // Operator-facing methods are auto-RPC: any async method on the class
 // is callable as `env.TENANT_AGENT.get(id).<method>(args)`.
 
 import { DurableObject } from "cloudflare:workers";
+import { assertControlPlaneId } from "../identity.js";
 
 type TenantStatus = "active" | "paused" | "suspended";
 
@@ -42,39 +43,59 @@ const ALLOWED_TRANSITIONS: Record<TenantStatus, TenantStatus[]> = {
 };
 
 export class TenantAgent extends DurableObject<Env> {
-  private async loadOrInit(tenantId: string): Promise<TenantState> {
-    const cached = await this.ctx.storage.get<TenantState>("state");
-    if (cached) return cached;
+  private parseStatus(status: string): TenantStatus {
+    if (status === "active" || status === "paused" || status === "suspended") return status;
+    throw new Error(`tenant_status_invalid: ${status}`);
+  }
 
-    // First touch: hydrate from D1 if a row exists, else assume active.
+  private async loadD1State(tenantId: string): Promise<TenantState> {
+    assertControlPlaneId("tenant", tenantId);
     const row = await this.env.DB.prepare(
-      `SELECT status, updated_at FROM tenants WHERE id = ?`,
+      `SELECT status, updated_at FROM tenants WHERE id = ? AND archived_at IS NULL`,
     )
       .bind(tenantId)
       .first<{ status: string; updated_at: string }>();
-
-    const status: TenantStatus =
-      (row?.status as TenantStatus | undefined) ?? "active";
-    const state: TenantState = {
+    if (!row) throw new Error("tenant_not_found");
+    return {
       tenantId,
-      status,
-      updatedAt: row?.updated_at ?? new Date().toISOString(),
+      status: this.parseStatus(row.status),
+      updatedAt: row.updated_at,
     };
-    await this.ctx.storage.put("state", state);
+  }
+
+  private async loadOrInit(tenantId: string): Promise<TenantState> {
+    assertControlPlaneId("tenant", tenantId);
+    const d1State = await this.loadD1State(tenantId);
+    const cached = await this.ctx.storage.get<TenantState>("state");
+    if (!cached) {
+      await this.ctx.storage.put("state", d1State);
+      return d1State;
+    }
+    const state = { ...cached, status: d1State.status, updatedAt: d1State.updatedAt };
+    if (cached.status !== state.status || cached.updatedAt !== state.updatedAt) {
+      await this.ctx.storage.put("state", state);
+    }
     return state;
   }
 
   private async persistAndMirror(state: TenantState): Promise<void> {
-    await this.ctx.storage.put("state", state);
-    await this.env.DB.prepare(
-      `UPDATE tenants SET status = ?, updated_at = ? WHERE id = ?`,
+    const result = await this.env.DB.prepare(
+      `UPDATE tenants
+          SET status = ?, updated_at = ?
+        WHERE id = ? AND archived_at IS NULL`,
     )
       .bind(state.status, state.updatedAt, state.tenantId)
       .run();
+    if (result.meta.changes !== 1) throw new Error("tenant_d1_mirror_drift");
+    await this.ctx.storage.put("state", state);
   }
 
   async getStatus(tenantId: string): Promise<TenantState> {
     return this.loadOrInit(tenantId);
+  }
+
+  async peekStatus(tenantId: string): Promise<TenantState> {
+    return this.loadD1State(tenantId);
   }
 
   async transition(

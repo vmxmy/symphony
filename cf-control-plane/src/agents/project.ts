@@ -11,14 +11,12 @@
 // Persistence:
 //   - hot state lives in DO storage
 //   - every transition mirrors to D1 `profiles.status`
-//   - draining timestamp is tracked in DO state but not yet mirrored;
-//     dashboard reads it through the agent until the schema gains a
-//     dedicated column
+//   - D1 is the identity registry; missing/archived rows are rejected before
+//     DO state is initialized.
 //
 // Phase 2 first cut does NOT yet implement:
 //   - polling schedule (Phase 3)
 //   - dispatch queue producer (Phase 4)
-//   - reconciliation (Phase 3)
 //   - drain completion tracking (waits on IssueAgent)
 
 import { DurableObject } from "cloudflare:workers";
@@ -27,8 +25,9 @@ import { extractLinearTrackerConfig } from "../tracker/config.js";
 import { mirrorIssues } from "../tracker/mirror.js";
 import { reconcileTick } from "../reconcile/tick.js";
 import type { ReconcileInput, Decision } from "../reconcile/types.js";
+import { assertControlPlaneId } from "../identity.js";
 
-type ProjectStatus = "active" | "paused" | "draining";
+type ProjectStatus = "active" | "paused" | "draining" | "archived";
 
 type ProjectState = {
   projectId: string; // `${tenantId}/${slug}`
@@ -61,49 +60,89 @@ const ALLOWED_TRANSITIONS: Record<ProjectStatus, ProjectStatus[]> = {
   active: ["paused", "draining"],
   paused: ["active"],
   draining: ["paused", "active"],
+  archived: [],
 };
 
 export class ProjectAgent extends DurableObject<Env> {
-  private async loadOrInit(
-    tenantId: string,
-    slug: string,
-  ): Promise<ProjectState> {
-    const cached = await this.ctx.storage.get<ProjectState>("state");
-    if (cached) return cached;
+  private parseStatus(status: string): ProjectStatus {
+    if (status === "active" || status === "paused" || status === "draining" || status === "archived") return status;
+    throw new Error(`project_status_invalid: ${status}`);
+  }
 
-    // Hydrate from D1; the profile row carries an authoritative status.
+  private async loadTenantStatus(tenantId: string): Promise<string> {
+    assertControlPlaneId("tenant", tenantId);
     const row = await this.env.DB.prepare(
-      `SELECT status, updated_at FROM profiles WHERE tenant_id = ? AND slug = ?`,
+      `SELECT status FROM tenants WHERE id = ? AND archived_at IS NULL`,
+    )
+      .bind(tenantId)
+      .first<{ status: string }>();
+    if (!row) throw new Error("tenant_not_found");
+    return row.status;
+  }
+
+  private async ensureTenantActive(tenantId: string): Promise<void> {
+    const status = await this.loadTenantStatus(tenantId);
+    if (status !== "active") throw new Error(`tenant_not_active: ${status}`);
+  }
+
+  private async loadD1State(tenantId: string, slug: string): Promise<ProjectState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    const row = await this.env.DB.prepare(
+      `SELECT status, updated_at FROM profiles
+        WHERE tenant_id = ? AND slug = ? AND archived_at IS NULL`,
     )
       .bind(tenantId, slug)
       .first<{ status: string; updated_at: string }>();
-
-    const status: ProjectStatus =
-      (row?.status as ProjectStatus | undefined) ?? "active";
-    const state: ProjectState = {
+    if (!row) throw new Error("project_not_found");
+    const status = this.parseStatus(row.status);
+    if (status === "archived") throw new Error("project_archived");
+    return {
       projectId: `${tenantId}/${slug}`,
       tenantId,
       slug,
       status,
-      updatedAt: row?.updated_at ?? new Date().toISOString(),
+      updatedAt: row.updated_at,
     };
-    await this.ctx.storage.put("state", state);
+  }
+
+  private async loadOrInit(
+    tenantId: string,
+    slug: string,
+  ): Promise<ProjectState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    const d1State = await this.loadD1State(tenantId, slug);
+    const cached = await this.ctx.storage.get<ProjectState>("state");
+    if (!cached) {
+      await this.ctx.storage.put("state", d1State);
+      return d1State;
+    }
+    const state = { ...cached, status: d1State.status, updatedAt: d1State.updatedAt };
+    if (cached.status !== state.status || cached.updatedAt !== state.updatedAt) {
+      await this.ctx.storage.put("state", state);
+    }
     return state;
   }
 
   private async persistAndMirror(state: ProjectState): Promise<void> {
-    await this.ctx.storage.put("state", state);
-    await this.env.DB.prepare(
+    const result = await this.env.DB.prepare(
       `UPDATE profiles
           SET status = ?, updated_at = ?
-        WHERE tenant_id = ? AND slug = ?`,
+        WHERE tenant_id = ? AND slug = ? AND archived_at IS NULL`,
     )
       .bind(state.status, state.updatedAt, state.tenantId, state.slug)
       .run();
+    if (result.meta.changes !== 1) throw new Error("project_d1_mirror_drift");
+    await this.ctx.storage.put("state", state);
   }
 
   async getStatus(tenantId: string, slug: string): Promise<ProjectState> {
     return this.loadOrInit(tenantId, slug);
+  }
+
+  async peekStatus(tenantId: string, slug: string): Promise<ProjectState> {
+    return this.loadD1State(tenantId, slug);
   }
 
   async transition(
@@ -113,6 +152,9 @@ export class ProjectAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<ProjectState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    if (next === "active" || next === "draining") await this.ensureTenantActive(tenantId);
     const current = await this.loadOrInit(tenantId, slug);
     if (current.status === next) return current; // idempotent
 
@@ -155,8 +197,11 @@ export class ProjectAgent extends DurableObject<Env> {
    * actioned — Phase 3 explicitly does not start runs.
    */
   async poll(tenantId: string, slug: string): Promise<PollResult> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    await this.ensureTenantActive(tenantId);
     const profileRow = await this.env.DB.prepare(
-      `SELECT id, tenant_id, slug, tracker_kind, config_json
+      `SELECT id, tenant_id, slug, status, tracker_kind, config_json
          FROM profiles
         WHERE tenant_id = ? AND slug = ? AND archived_at IS NULL`,
     )
@@ -165,10 +210,12 @@ export class ProjectAgent extends DurableObject<Env> {
         id: string;
         tenant_id: string;
         slug: string;
+        status: string;
         tracker_kind: string;
         config_json: string;
       }>();
     if (!profileRow) throw new Error("profile_not_found");
+    if (profileRow.status !== "active") throw new Error(`project_not_active: ${profileRow.status}`);
     if (profileRow.tracker_kind !== "linear") {
       throw new Error(
         `tracker_kind_unsupported: expected 'linear', got '${profileRow.tracker_kind}'`,
@@ -280,4 +327,3 @@ export class ProjectAgent extends DurableObject<Env> {
     };
   }
 }
-

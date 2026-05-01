@@ -1,8 +1,11 @@
+export {};
+
 // Smoke for the deployed control-plane Worker.
 //
 // Probes:
 //   GET /                   - public banner (200 plain text)
-//   GET /api/v1/healthz     - public, must be 200 with db ok
+//   GET /api/v1/healthz     - public readiness alias, must be 200 with db/token ok
+//   GET /api/v1/readyz      - public readiness, must be 200 when token/db configured
 //   GET /api/v1/state       - no token (expect 401)
 //   GET /api/v1/state       - with bearer token (expect 200 + tenants/profiles)
 //   GET /api/v1/tenants     - with bearer token
@@ -56,6 +59,7 @@ const auth = { authorization: `Bearer ${OPERATOR_TOKEN}` };
 
 await probe("GET / (banner, no auth)", 200, () => fetch(`${WORKER_URL}/`));
 await probe("GET /api/v1/healthz (no auth)", 200, () => fetch(`${WORKER_URL}/api/v1/healthz`));
+await probe("GET /api/v1/readyz (no auth)", 200, () => fetch(`${WORKER_URL}/api/v1/readyz`));
 await probe("GET /api/v1/state (no token, expect 401)", 401, () =>
   fetch(`${WORKER_URL}/api/v1/state`),
 );
@@ -71,6 +75,9 @@ await probe("GET /api/v1/tenants (auth)", 200, () =>
 );
 await probe("GET /api/v1/profiles (auth)", 200, () =>
   fetch(`${WORKER_URL}/api/v1/profiles`, { headers: auth }),
+);
+await probe("GET /dashboard (auth)", 200, () =>
+  fetch(`${WORKER_URL}/dashboard`, { headers: auth }),
 );
 
 if (stateRes.ok) {
@@ -110,8 +117,8 @@ async function postAction(path: string) {
 async function getStateJson() {
   const r = await fetch(`${WORKER_URL}/api/v1/state`, { headers: auth });
   return JSON.parse(await r.text()) as {
-    tenants: Array<{ id: string; status: string; agent?: { status: string } }>;
-    profiles: Array<{ tenant_id: string; slug: string; status: string; agent?: { status: string } }>;
+    tenants: Array<{ id: string; status: string }>;
+    profiles: Array<{ tenant_id: string; slug: string; status: string }>;
   };
 }
 
@@ -120,15 +127,15 @@ const profileSlug = "content-wechat";
 
 console.error("\n[transition probes]");
 
-// 1. Tenant: pause -> verify both D1 status and agent hot state -> resume
+// 1. Tenant: pause -> verify D1 status -> resume
 await probe("POST tenant pause", 200, () =>
   postAction(`/api/v1/tenants/${tenantId}/actions/pause`),
 );
 {
   const s = await getStateJson();
   const t = s.tenants.find((x) => x.id === tenantId);
-  const ok = t?.status === "paused" && t?.agent?.status === "paused";
-  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant.status mirrored to D1+agent: D1=${t?.status} agent=${t?.agent?.status}`);
+  const ok = t?.status === "paused";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant.status mirrored to D1: D1=${t?.status}`);
   if (!ok) failures++;
 }
 await probe("POST tenant resume", 200, () =>
@@ -137,8 +144,8 @@ await probe("POST tenant resume", 200, () =>
 {
   const s = await getStateJson();
   const t = s.tenants.find((x) => x.id === tenantId);
-  const ok = t?.status === "active" && t?.agent?.status === "active";
-  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant returned to active: D1=${t?.status} agent=${t?.agent?.status}`);
+  const ok = t?.status === "active";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant returned to active: D1=${t?.status}`);
   if (!ok) failures++;
 }
 
@@ -149,13 +156,20 @@ await probe("POST project drain", 200, () =>
 {
   const s = await getStateJson();
   const p = s.profiles.find((x) => x.tenant_id === tenantId && x.slug === profileSlug);
-  const ok = p?.status === "draining" && p?.agent?.status === "draining";
-  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] project.status mirrored to D1+agent: D1=${p?.status} agent=${p?.agent?.status}`);
+  const ok = p?.status === "draining";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] project.status mirrored to D1: D1=${p?.status}`);
   if (!ok) failures++;
 }
 await probe("POST project resume", 200, () =>
   postAction(`/api/v1/projects/${tenantId}/${profileSlug}/actions/resume`),
 );
+{
+  const s = await getStateJson();
+  const p = s.profiles.find((x) => x.tenant_id === tenantId && x.slug === profileSlug);
+  const ok = p?.status === "active";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] project returned to active: D1=${p?.status}`);
+  if (!ok) failures++;
+}
 
 // 3. Invalid transition: tenant suspend then drain (drain not allowed on tenant)
 const invalidRes = await fetch(`${WORKER_URL}/api/v1/tenants/${tenantId}/actions/drain`, {
@@ -166,6 +180,31 @@ const invalidRes = await fetch(`${WORKER_URL}/api/v1/tenants/${tenantId}/actions
   const ok = invalidRes.status === 404;
   console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant 'drain' route does not exist (404 expected, got ${invalidRes.status})`);
   if (!ok) failures++;
+}
+
+// ---- mock orchestration probe --------------------------------------------
+console.error("\n[mock run probe]");
+const mockIdentifier = `SMOKE-${Date.now()}`;
+const mockRes = await fetch(
+  `${WORKER_URL}/api/v1/projects/${tenantId}/${profileSlug}/issues/${mockIdentifier}/actions/mock-run`,
+  { method: "POST", headers: auth },
+);
+const mockBody = await mockRes.text();
+let mockJson: { run?: { run_id: string } } | null = null;
+try { mockJson = JSON.parse(mockBody) as { run?: { run_id: string } }; } catch { /* keep null */ }
+const mockOk = mockRes.status === 200 && Boolean(mockJson?.run?.run_id);
+console.error(`${stamp()} [${mockOk ? "PASS" : "FAIL"}] POST mock-run HTTP=${mockRes.status}`);
+if (!mockOk) {
+  failures++;
+  console.error(`  body=${mockBody.slice(0, 240)}`);
+} else {
+  const detailRes = await fetch(`${WORKER_URL}/api/v1/runs/${mockJson!.run!.run_id}`, { headers: auth });
+  const detailBody = await detailRes.text();
+  let detailJson: { steps?: unknown[]; events?: unknown[]; tool_calls?: unknown[] } | null = null;
+  try { detailJson = JSON.parse(detailBody) as { steps?: unknown[]; events?: unknown[]; tool_calls?: unknown[] }; } catch { /* keep null */ }
+  const detailOk = detailRes.status === 200 && (detailJson?.steps?.length ?? 0) >= 4 && (detailJson?.events?.length ?? 0) > 0 && (detailJson?.tool_calls?.length ?? 0) > 0;
+  console.error(`${stamp()} [${detailOk ? "PASS" : "FAIL"}] GET run detail includes steps/events/tool_calls`);
+  if (!detailOk) failures++;
 }
 
 // ---- refresh probe (Phase 3 US-004) --------------------------------------

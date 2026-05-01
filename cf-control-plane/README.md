@@ -14,11 +14,14 @@ it, with no traffic crossover until a profile explicitly opts in.
 - [x] D1 schema (`migrations/0001_init.sql`) — first cut covering tenants,
       profiles, issues, runs, run_steps, run_events, tool_calls, approvals,
       and idempotency_records (per target §11 + §13.1).
-- [ ] Worker entrypoint with Access protection.
-- [ ] TenantAgent / ProjectAgent skeleton state.
-- [ ] Profile import (v1 → v2 auto-upgrade per target §10.1).
-- [ ] Read-only dashboard.
-- [ ] Mock orchestration run that emits `runs` + `run_events`.
+- [x] Worker entrypoint with temporary operator-token gate; Cloudflare Access
+      JWT validation remains a later OperatorAgent/Access integration.
+- [x] TenantAgent / ProjectAgent skeleton state with D1-backed identity checks.
+- [x] Profile import (v1 → v2 auto-upgrade per target §10.1) with dry-run by
+      default and explicit `--apply` for D1 writes.
+- [x] Read-only dashboard rendered from D1 read models.
+- [x] Mock orchestration run that emits `runs`, `run_steps`, `run_events`, and
+      `tool_calls`.
 
 ## Layout
 
@@ -26,7 +29,8 @@ it, with no traffic crossover until a profile explicitly opts in.
 cf-control-plane/
 ├── migrations/         # D1 schema migrations (wrangler d1 migrations apply)
 │   └── 0001_init.sql
-├── src/                # Worker / Agents / Workflows code (added in later commits)
+├── scripts/            # Operator CLIs and smoke probes
+├── src/                # Worker / Agents / dashboard / mock orchestration code
 ├── wrangler.toml       # D1/R2/Queues bindings; database_id is filled in by db:create
 ├── package.json
 ├── tsconfig.json       # @cloudflare/workers-types only; strict
@@ -62,9 +66,10 @@ bun run db:list:remote
 bun run db:tables
 ```
 
-Migrations are idempotent (`CREATE TABLE IF NOT EXISTS` everywhere) so
-re-applying is safe; wrangler also tracks applied migrations in its own
-bookkeeping table.
+The initial schema migration intentionally creates tables without
+`IF NOT EXISTS`: if a remote database already has an incompatible table shape,
+the migration should fail loudly instead of silently accepting schema drift.
+Wrangler still tracks applied migration files in its bookkeeping table.
 
 ## Adding a migration
 
@@ -74,12 +79,11 @@ wrangler d1 migrations create symphony-control-plane <short-description>
 # `bun run db:migrate:local` to validate.
 ```
 
-Each migration must be replay-safe:
-- `CREATE TABLE IF NOT EXISTS`, not `CREATE TABLE`.
-- `CREATE INDEX IF NOT EXISTS`, not `CREATE INDEX`.
-- For column adds: `ALTER TABLE … ADD COLUMN` is idempotent only via the
-  manual check pattern (SQLite has no `IF NOT EXISTS` for columns); wrap in
-  a guarded block or split into a per-database one-shot script.
+Each new migration should be exactly-once and auditable:
+- Prefer failing loudly on incompatible existing objects over masking drift.
+- Keep `CREATE INDEX IF NOT EXISTS` for additive indexes.
+- For column adds: `ALTER TABLE … ADD COLUMN` is not replay-safe in SQLite;
+  ship it as a new Wrangler migration and validate the resulting schema.
 
 ## Schema design notes
 
@@ -90,9 +94,39 @@ Each migration must be replay-safe:
   `PRAGMA foreign_keys = OFF`. Relations are validated in app logic.
 - All timestamps are ISO-8601 UTC TEXT for portability and human-readable
   diagnostics.
-- Each table that can grow without bound has an `archived_at` column and a
-  partial index `WHERE archived_at IS NULL` so dashboard queries stay
-  selective even after retention sweeps run.
+- Each table that can grow without bound has an `archived_at` column or a
+  time-window retention index so dashboard queries stay selective after
+  retention sweeps run.
+
+## Profile import
+
+`import:profile` is safe by default:
+
+```bash
+# Prints generated SQL and import warnings; does not mutate D1.
+bun run import:profile -- --profile ../profiles/content-wechat --dry-run
+
+# Applies to the local D1 database.
+bun run import:profile -- --profile ../profiles/content-wechat --apply --local
+```
+
+Profiles use a stable registry id (`<tenant>/<slug>`) and `active_version`
+tracks the currently imported bundle version. Re-imports use an explicit
+UPSERT on `(tenant_id, slug)` and preserve historical `issues.profile_id` /
+`runs.issue_id` joins. R2 persistence for `source_bundle_ref` and
+`normalized_config_ref` is still deferred; the importer prints a warning and
+writes `NULL` refs until the R2 bucket lands.
+
+## Auth and readiness
+
+- `GET /` is the public liveness banner.
+- `GET /api/v1/healthz` and `GET /api/v1/readyz` are public readiness checks.
+  They report sanitized DB/operator-token status and return `503` until
+  protected routes are actually usable.
+- API routes and `/dashboard` share the same operator-principal auth shim. The
+  temporary bearer token maps to an all-capabilities operator principal today;
+  Cloudflare Access JWTs can replace the provider later without changing route
+  authorization call sites.
 
 ## Phase 2 readiness mapping
 
