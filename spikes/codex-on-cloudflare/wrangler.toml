@@ -1,0 +1,28 @@
+name = "symphony-codex-spike"
+main = "src/worker.ts"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Container is fronted by a Durable Object so the runtime can route
+# subsequent requests to the same instance for sticky-session experiments.
+[[durable_objects.bindings]]
+name = "CODEX_CONTAINER"
+class_name = "CodexContainer"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CodexContainer"]
+
+[[containers]]
+class_name = "CodexContainer"
+image = "./Dockerfile"
+instance_type = "standard-1"
+max_instances = 3
+
+# Secrets to provide (do NOT commit):
+#   CODEX_AUTH_JSON  : contents of ~/.codex/auth.json from an authenticated host.
+#   OPENAI_API_KEY   : optional, if codex auth uses a raw API key path.
+#
+# Set via:
+#   wrangler secret put CODEX_AUTH_JSON
+#   wrangler secret put OPENAI_API_KEY
