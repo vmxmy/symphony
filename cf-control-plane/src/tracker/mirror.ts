@@ -1,8 +1,16 @@
 // Mirror tracker-fetched issues into the D1 issues table.
 //
 // UPSERT semantics:
-//   - Deterministic row id `${profileId}:${issue.id}` so tracker-side stable
-//     identity survives human-readable identifier renames.
+//   - Identity oracle is the partial unique index
+//     idx_issues_profile_external_unique on (profile_id, external_id)
+//     WHERE external_id IS NOT NULL. Looking up by that pair survives both
+//     identifier renames AND historical rows whose primary-key id was
+//     constructed differently (e.g. earlier Phase 3 work used
+//     `${profileId}:${identifier}` while current code uses
+//     `${profileId}:${issue.id}`). Mixed id-format rows coexist safely.
+//   - Tracker-fetched issues always carry a non-null `issue.id` so the
+//     partial-index lookup is always valid in this code path; mock /
+//     non-tracker rows that have NULL external_id are managed elsewhere.
 //   - INSERT path sets first_seen_at AND last_seen_at to `now`.
 //   - UPDATE path bumps last_seen_at always; updates state / title / url /
 //     priority / snapshot_json only when changed; clears archived_at if
@@ -35,12 +43,13 @@ export async function mirrorIssues(
 
     const existing = await db
       .prepare(
-          `SELECT identifier, state, title, url, priority, snapshot_json
+          `SELECT id, identifier, state, title, url, priority, snapshot_json
            FROM issues
-          WHERE id = ?`,
+          WHERE profile_id = ? AND external_id = ?`,
       )
-      .bind(id)
+      .bind(profileId, issue.id)
       .first<{
+        id: string;
         state: string;
         identifier: string;
         title: string | null;
@@ -105,25 +114,21 @@ export async function mirrorIssues(
           snapshot,
           now,
           now,
-          id,
+          existing.id,
         )
         .run();
       stats.updated++;
     } else {
-      // Stale data still bumps last_seen_at so the dashboard "freshness"
-      // column stays useful, but we report this as `unchanged` to the
-      // operator since nothing meaningful changed.
-      //
-      // Defense-in-depth: also clear archived_at when an issue we already
-      // archived reappears in the tracker's active/terminal set with an
-      // identical snapshot. Without this, a same-snapshot re-emergence
-      // would land here and stay archived in D1 forever — operator-
-      // visible drift between tracker and dashboard. The change-detection
-      // path above already clears archived_at via UPDATE, so this is the
-      // strict edge case.
+      // Identical snapshot: only bump last_seen_at; do NOT touch
+      // archived_at. The earlier "defense-in-depth clear archived_at"
+      // here oscillated with the cleanup decision loop — every other
+      // poll would un-archive (here) then re-archive (cleanup), a
+      // permanent flap on stable terminal state. Meaningful re-
+      // emergence (terminal -> active) carries a state change and
+      // lands in the `changed` branch above, which clears archived_at.
       await db
-        .prepare(`UPDATE issues SET last_seen_at = ?, archived_at = NULL WHERE id = ?`)
-        .bind(now, id)
+        .prepare(`UPDATE issues SET last_seen_at = ? WHERE id = ?`)
+        .bind(now, existing.id)
         .run();
       stats.unchanged++;
     }
