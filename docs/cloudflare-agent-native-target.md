@@ -1103,7 +1103,7 @@ Deliverables:
 - LinearTrackerAdapter running on Cloudflare Workers (commit 4b1c0aa).
 - Scheduled ProjectAgent polling (commit 48d085e).
 - D1 issue mirror (commit 4b1c0aa).
-- Queue-based tracker event ingestion (in progress this session).
+- Queue-based tracker event ingestion (commit f185bf7).
 - `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
 
 Exit criteria:

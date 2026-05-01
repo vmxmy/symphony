@@ -39,7 +39,7 @@ Phase 3 (tracker adapter bridge):
 - [x] LinearTrackerAdapter running on Cloudflare Workers (commit 4b1c0aa).
 - [x] Scheduled ProjectAgent polling via cron (commit 48d085e).
 - [x] D1 issue mirror with idempotent upserts (commit 4b1c0aa).
-- [ ] Queue-based tracker event ingestion (in progress this session).
+- [x] Queue-based tracker event ingestion (commit f185bf7).
 - [x] `POST /api/v1/refresh` compatibility route (commit 4b1c0aa).
 
 ## Layout
