@@ -10,7 +10,10 @@
     "db:list:local": "wrangler d1 migrations list symphony-control-plane --local",
     "db:list:remote": "wrangler d1 migrations list symphony-control-plane --remote",
     "db:tables": "wrangler d1 execute symphony-control-plane --remote --command \"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' AND name NOT LIKE '_cf_%' ORDER BY name\"",
-    "import:profile": "bun run scripts/import-profile.ts"
+    "import:profile": "bun run scripts/import-profile.ts",
+    "worker:deploy": "wrangler deploy",
+    "worker:tail": "wrangler tail",
+    "worker:smoke": "bun run scripts/worker-smoke.ts"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250410.0",
