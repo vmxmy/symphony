@@ -4,13 +4,13 @@
 // agent (Codex / mock / future SDK) is injected via `agentFactory`.
 
 import type { Issue, WorkflowConfig, TokenUsage } from "./types.js";
-import type { Logger } from "./log.js";
-import type { LinearClient } from "./linear.js";
-import type { WorkspaceManager } from "./workspace.js";
 import type { State } from "./state.js";
 import type { Agent, AgentFactory, ToolResult, AgentTokenUsage } from "./agent/types.js";
+import type { TrackerAdapter } from "./contracts/tracker.js";
+import type { WorkspaceAdapter } from "./contracts/workspace.js";
+import type { EventSink } from "./contracts/events.js";
+import type { ToolGateway } from "./contracts/tools.js";
 import { PromptBuilder } from "./prompt.js";
-import { makeLinearGraphqlHandler, symphonyDynamicToolSpecs } from "./dynamic_tool.js";
 
 export type AgentRunOutcome =
   | { status: "completed" }
@@ -19,13 +19,14 @@ export type AgentRunOutcome =
   | { status: "error"; error: string };
 
 export type AgentRunnerDeps = {
-  linear: LinearClient;
-  workspace: WorkspaceManager;
+  tracker: TrackerAdapter;
+  workspace: WorkspaceAdapter;
   state: State;
   promptBuilder: PromptBuilder;
-  log: Logger;
+  log: EventSink;
   config: () => WorkflowConfig;
   agentFactory: AgentFactory;
+  toolGateway: ToolGateway;
 };
 
 export class AgentRunner {
@@ -33,20 +34,20 @@ export class AgentRunner {
 
   async run(issue: Issue, attempt: number): Promise<AgentRunOutcome> {
     const cfg = this.deps.config();
-    const workspacePath = await this.deps.workspace.ensure(issue);
+    const workspace = await this.deps.workspace.ensure(issue);
+    const workspacePath = workspace.path;
     const session = this.deps.state.startAgent(issue, workspacePath);
 
     const agent: Agent = this.deps.agentFactory({ cwd: workspacePath });
-    const linearGraphql = makeLinearGraphqlHandler(this.deps.linear);
     const tokens: TokenUsage = { totalTokens: 0, inputTokens: 0, outputTokens: 0, secondsRunning: 0 };
     const startedAt = Date.now();
 
     try {
-      try { await this.deps.workspace.runHook("before_run", workspacePath); }
+      try { await this.deps.workspace.runHook("before_run", workspace); }
       catch (e) { this.deps.log.warn(`before_run failed: ${(e as Error).message}`); }
 
       await agent.start();
-      await agent.startSession({ cwd: workspacePath, tools: symphonyDynamicToolSpecs });
+      await agent.startSession({ cwd: workspacePath, tools: this.deps.toolGateway.definitions() });
 
       let turnNumber = 0;
       while (turnNumber < cfg.agent.maxTurns) {
@@ -60,7 +61,7 @@ export class AgentRunner {
         // tool calls. Refresh dashboard every 5s so users see real-time progress.
         const statePoll = setInterval(async () => {
           try {
-            const fresh = await this.deps.linear.fetchIssuesByIds([issue.id]);
+            const fresh = await this.deps.tracker.fetchIssuesByIds([issue.id]);
             if (fresh[0]) {
               this.deps.state.updateAgent(issue.id, { state: fresh[0].state });
               issue.state = fresh[0].state;
@@ -84,7 +85,7 @@ export class AgentRunner {
           },
           onToolCall: async (call): Promise<ToolResult> => {
             this.deps.log.debug(`tool_call: ${call.name}`, { issue: issue.identifier });
-            return await linearGraphql(call);
+            return await this.deps.toolGateway.handle(call);
           },
         });
 
@@ -103,7 +104,7 @@ export class AgentRunner {
         }
 
         // Re-fetch issue state from Linear to decide continuation
-        const fresh = await this.deps.linear.fetchIssuesByIds([issue.id]);
+        const fresh = await this.deps.tracker.fetchIssuesByIds([issue.id]);
         const updated = fresh[0];
         const stillActive =
           updated && cfg.tracker.activeStates.includes(updated.state);
@@ -133,10 +134,10 @@ export class AgentRunner {
       tokens.secondsRunning = Math.floor((Date.now() - startedAt) / 1000);
       this.deps.state.finishAgent(issue.id, tokens);
       try { await agent.stop(); } catch { /* ignore */ }
-      try { await this.deps.workspace.runHook("after_run", workspacePath); } catch { /* ignore */ }
+      try { await this.deps.workspace.runHook("after_run", workspace); } catch { /* ignore */ }
       return { status: "error", error: (e as Error).message };
     } finally {
-      try { await this.deps.workspace.runHook("after_run", workspacePath); } catch { /* ignore */ }
+      try { await this.deps.workspace.runHook("after_run", workspace); } catch { /* ignore */ }
     }
   }
 }

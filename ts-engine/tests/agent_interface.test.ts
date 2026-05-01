@@ -13,6 +13,7 @@ import { Logger } from "../src/log.js";
 import { PromptBuilder } from "../src/prompt.js";
 import { State } from "../src/state.js";
 import { WorkspaceManager } from "../src/workspace.js";
+import { LinearToolGateway } from "../src/dynamic_tool.js";
 import type { Issue, WorkflowConfig } from "../src/types.js";
 import type { LinearClient } from "../src/linear.js";
 
@@ -105,6 +106,38 @@ describe("Agent interface contract", () => {
     expect(toolResults).toHaveLength(1);
     expect(toolResults[0]?.success).toBe(true);
     expect(toolResults[0]?.output).toContain("user-123");
+  });
+
+  test("AgentRunner returns failed result for unknown tool calls via gateway", async () => {
+    // #given - script the agent to call a tool name that the gateway does not know
+    const harness = makeHarness({
+      script: {
+        turns: [
+          {
+            events: [
+              {
+                kind: "tool_call",
+                call: {
+                  id: "tc-unknown",
+                  name: "definitely_not_a_real_tool",
+                  arguments: { anything: "ignored" },
+                },
+              },
+            ],
+          },
+        ],
+      },
+      issueStateAfterTurn: ["Done"],
+    });
+
+    // #when
+    await harness.runner.run(harness.issue, 1);
+
+    // #then - gateway returns a failed ToolResult, no graphql call attempted
+    const toolResults = harness.mock.inspect().toolResults;
+    expect(toolResults).toHaveLength(1);
+    expect(toolResults[0]?.success).toBe(false);
+    expect(toolResults[0]?.output).toContain("Unsupported");
   });
 
   test("AgentRunner reports max_turns_exceeded when issue stays active", async () => {
@@ -246,15 +279,17 @@ function makeHarness(opts: HarnessOptions): {
   } satisfies Partial<LinearClient> as unknown as LinearClient;
 
   const mock = new MockAgent(opts.script);
+  const toolGateway = new LinearToolGateway(linear);
 
   const runner = new AgentRunner({
-    linear,
+    tracker: linear,
     workspace,
     state,
     promptBuilder,
     log: logger,
     config: () => cfg,
     agentFactory: () => mock,
+    toolGateway,
   });
 
   return {

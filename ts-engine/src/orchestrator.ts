@@ -2,12 +2,13 @@
 // Implements the SPEC poll loop, dispatch, retry queue, and reconciliation behavior.
 
 import type { WorkflowConfig, Issue } from "./types.js";
-import type { Logger } from "./log.js";
-import type { LinearClient } from "./linear.js";
-import type { WorkspaceManager } from "./workspace.js";
 import { State, nextBackoffMs } from "./state.js";
 import { AgentRunner } from "./agent.js";
 import type { AgentFactory } from "./agent/types.js";
+import type { TrackerAdapter } from "./contracts/tracker.js";
+import type { WorkspaceAdapter } from "./contracts/workspace.js";
+import type { EventSink } from "./contracts/events.js";
+import type { ToolGateway } from "./contracts/tools.js";
 import { PromptBuilder } from "./prompt.js";
 
 export class Orchestrator {
@@ -17,13 +18,14 @@ export class Orchestrator {
 
   constructor(
     private deps: {
-      linear: LinearClient;
-      workspace: WorkspaceManager;
+      tracker: TrackerAdapter;
+      workspace: WorkspaceAdapter;
       state: State;
       promptBuilder: PromptBuilder;
-      log: Logger;
+      log: EventSink;
       config: () => WorkflowConfig;
       agentFactory: AgentFactory;
+      toolGateway: ToolGateway;
     },
   ) {}
 
@@ -75,7 +77,7 @@ export class Orchestrator {
 
   private async tick(): Promise<void> {
     const cfg = this.deps.config();
-    const active = await this.deps.linear.fetchActiveIssues();
+    const active = await this.deps.tracker.fetchActiveIssues();
     this.deps.log.debug(`tick: fetched ${active.length} active`);
 
     // Reconcile: detect issues that left active states
@@ -83,7 +85,7 @@ export class Orchestrator {
     for (const session of [...this.deps.state.running.values()]) {
       if (!seenIds.has(session.issueId)) {
         // Issue likely moved to terminal or pause — refetch state explicitly
-        const fresh = await this.deps.linear.fetchIssuesByIds([session.issueId]);
+        const fresh = await this.deps.tracker.fetchIssuesByIds([session.issueId]);
         const updated = fresh[0];
         if (!updated) {
           this.deps.log.info(`reconcile: ${session.issueIdentifier} not visible — leaving running entry`);
@@ -108,7 +110,7 @@ export class Orchestrator {
     }
 
     // Cleanup terminal-state workspaces
-    const terminal = await this.deps.linear.fetchTerminalIssues();
+    const terminal = await this.deps.tracker.fetchTerminalIssues();
     for (const t of terminal) {
       // best-effort: only remove if a workspace exists
       const path = this.deps.workspace.pathFor(t);

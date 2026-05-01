@@ -2,6 +2,10 @@
 // Query shapes are kept stable so workflow behavior stays predictable.
 
 import type { Issue, BlockedRef, TrackerConfig } from "./types.js";
+import type {
+  TrackerAdapter,
+  RawTrackerToolAdapter,
+} from "./contracts/tracker.js";
 
 const ISSUE_PAGE_SIZE = 50;
 const RELATION_FIRST = 25;
@@ -80,7 +84,7 @@ type RawIssueNode = {
   updatedAt: string | null;
 };
 
-export class LinearClient {
+export class LinearClient implements TrackerAdapter, RawTrackerToolAdapter {
   constructor(private cfg: TrackerConfig) {
     if (!cfg.apiKey) {
       throw new Error("linear_no_api_key: set LINEAR_API_KEY env or tracker.api_key");
