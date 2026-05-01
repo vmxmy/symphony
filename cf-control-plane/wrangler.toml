@@ -1,14 +1,16 @@
 name = "symphony-control-plane"
+main = "src/worker.ts"
 compatibility_date = "2026-04-01"
 compatibility_flags = ["nodejs_compat"]
 
-# Worker entrypoint is intentionally absent in this Phase 2 first-cut. We
-# start with D1 schema only; Worker / Agents / Workflows wiring lands in
-# subsequent commits once the schema is stable. To re-enable Worker deploy:
+# Routes / Access policy: the dev URL is symphony-control-plane.<subdomain>.workers.dev.
+# Real Cloudflare Access (Zero Trust) JWT validation is Phase 8 work; the
+# Worker currently uses a single shared bearer token in OPERATOR_TOKEN.
+# Provision the token with:
+#   wrangler secret put OPERATOR_TOKEN --name symphony-control-plane
 #
-#   main = "src/worker.ts"
-#
-# and add the Worker routes/Access policy.
+# Public routes (no auth): GET / and GET /api/v1/healthz.
+# Gated routes (Bearer): /api/v1/state, /api/v1/tenants, /api/v1/profiles.
 
 # ---------------------------------------------------------------------------
 # D1: control-plane index database (tenants, profiles, issues, runs, events,
