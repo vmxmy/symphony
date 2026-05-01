@@ -38,9 +38,17 @@ class_name = "TenantAgent"
 name = "PROJECT_AGENT"
 class_name = "ProjectAgent"
 
+[[durable_objects.bindings]]
+name = "ISSUE_AGENT"
+class_name = "IssueAgent"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TenantAgent", "ProjectAgent"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["IssueAgent"]
 
 # ---------------------------------------------------------------------------
 # R2: artifact bucket for run bundles, transcripts, snapshots, tool payloads.

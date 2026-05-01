@@ -10,7 +10,10 @@ export function isControlPlaneId(value: string): boolean {
   return CONTROL_PLANE_ID_PATTERN.test(value);
 }
 
-export function durableObjectName(kind: "tenant" | "project", ...parts: string[]): string {
+export function durableObjectName(
+  kind: "tenant" | "project" | "issue",
+  ...parts: string[]
+): string {
   for (const part of parts) assertControlPlaneId(kind, part);
   return [kind, ...parts.map(encodeURIComponent)].join(":");
 }

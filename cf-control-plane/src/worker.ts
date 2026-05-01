@@ -16,6 +16,7 @@
 
 import { TenantAgent } from "./agents/tenant.js";
 import { ProjectAgent } from "./agents/project.js";
+import { IssueAgent } from "./agents/issue.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard } from "./dashboard/render.js";
 import type { DashboardState, ProfileView, TenantView } from "./dashboard/render.js";
@@ -33,12 +34,13 @@ import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/schedul
 import { handleTrackerRefresh } from "./queues/handlers.js";
 import type { TrackerRefreshMessage } from "./queues/types.js";
 
-export { TenantAgent, ProjectAgent };
+export { TenantAgent, ProjectAgent, IssueAgent };
 
 interface Env {
   DB: D1Database;
   TENANT_AGENT: DurableObjectNamespace<TenantAgent>;
   PROJECT_AGENT: DurableObjectNamespace<ProjectAgent>;
+  ISSUE_AGENT: DurableObjectNamespace<IssueAgent>;
   // Bearer token for the placeholder auth gate. If unset, the Worker fails
   // closed: every authenticated route returns 503.
   OPERATOR_TOKEN?: string;
@@ -58,6 +60,13 @@ function tenantAgentFor(env: Env, tenantId: string) {
 function projectAgentFor(env: Env, tenantId: string, slug: string) {
   const id = env.PROJECT_AGENT.idFromName(durableObjectName("project", tenantId, slug));
   return env.PROJECT_AGENT.get(id);
+}
+
+function issueAgentFor(env: Env, tenantId: string, slug: string, externalId: string) {
+  const id = env.ISSUE_AGENT.idFromName(
+    durableObjectName("issue", tenantId, slug, externalId),
+  );
+  return env.ISSUE_AGENT.get(id);
 }
 
 type TenantRow = {
@@ -561,6 +570,55 @@ export default {
           return jsonResponse({ project: result });
         } catch (e) {
           return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
+        }
+      }
+
+      // ---- IssueAgent state + transitions (Phase 4 sub-cut 1) ----
+      // GET  /api/v1/issues/:tenant/:slug/:external_id/state
+      // POST /api/v1/issues/:tenant/:slug/:external_id/actions/{dispatch,pause,resume,cancel}
+      const issueState = url.pathname.match(
+        /^\/api\/v1\/issues\/([^/]+)\/([^/]+)\/([^/]+)\/state$/,
+      );
+      if (issueState) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId] = issueState;
+        try {
+          const stub = issueAgentFor(env, tenantId!, slug!, externalId!);
+          const state = await stub.getStatus(tenantId!, slug!, externalId!);
+          return jsonResponse({ issue: state });
+        } catch (e) {
+          return jsonResponse(
+            { error: "issue_state_failed", message: String((e as Error).message) },
+            { status: 500 },
+          );
+        }
+      }
+
+      const issueAction = url.pathname.match(
+        /^\/api\/v1\/issues\/([^/]+)\/([^/]+)\/([^/]+)\/actions\/(dispatch|pause|resume|cancel)$/,
+      );
+      if (issueAction) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:issue.transition");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId, action] = issueAction;
+        const decidedBy = req.headers.get("x-symphony-operator") ?? undefined;
+        const reason = req.headers.get("x-symphony-reason") ?? undefined;
+        try {
+          const stub = issueAgentFor(env, tenantId!, slug!, externalId!);
+          let result;
+          if (action === "dispatch") result = await stub.dispatch(tenantId!, slug!, externalId!, decidedBy, reason);
+          else if (action === "pause") result = await stub.pause(tenantId!, slug!, externalId!, decidedBy, reason);
+          else if (action === "resume") result = await stub.resume(tenantId!, slug!, externalId!, decidedBy, reason);
+          else result = await stub.cancel(tenantId!, slug!, externalId!, decidedBy, reason);
+          return jsonResponse({ issue: result });
+        } catch (e) {
+          return jsonResponse(
+            { error: "issue_transition_rejected", message: String((e as Error).message) },
+            { status: 409 },
+          );
         }
       }
 

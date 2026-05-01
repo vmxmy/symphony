@@ -4,6 +4,7 @@ export type Capability =
   | "write:tenant.transition"
   | "write:project.transition"
   | "write:project.refresh"
+  | "write:issue.transition"
   | "write:run.mock";
 
 export type Principal = {
@@ -26,6 +27,7 @@ const ALL_CAPABILITIES: Capability[] = [
   "write:tenant.transition",
   "write:project.transition",
   "write:project.refresh",
+  "write:issue.transition",
   "write:run.mock",
 ];
 
