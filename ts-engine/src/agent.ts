@@ -9,8 +9,8 @@ import type { LinearClient } from "./linear.js";
 import type { WorkspaceManager } from "./workspace.js";
 import type { State } from "./state.js";
 import type { Agent, AgentFactory, ToolResult, AgentTokenUsage } from "./agent/types.js";
+import type { ToolGateway } from "./contracts/tools.js";
 import { PromptBuilder } from "./prompt.js";
-import { makeLinearGraphqlHandler, symphonyDynamicToolSpecs } from "./dynamic_tool.js";
 
 export type AgentRunOutcome =
   | { status: "completed" }
@@ -26,6 +26,7 @@ export type AgentRunnerDeps = {
   log: Logger;
   config: () => WorkflowConfig;
   agentFactory: AgentFactory;
+  toolGateway: ToolGateway;
 };
 
 export class AgentRunner {
@@ -37,7 +38,6 @@ export class AgentRunner {
     const session = this.deps.state.startAgent(issue, workspacePath);
 
     const agent: Agent = this.deps.agentFactory({ cwd: workspacePath });
-    const linearGraphql = makeLinearGraphqlHandler(this.deps.linear);
     const tokens: TokenUsage = { totalTokens: 0, inputTokens: 0, outputTokens: 0, secondsRunning: 0 };
     const startedAt = Date.now();
 
@@ -46,7 +46,7 @@ export class AgentRunner {
       catch (e) { this.deps.log.warn(`before_run failed: ${(e as Error).message}`); }
 
       await agent.start();
-      await agent.startSession({ cwd: workspacePath, tools: symphonyDynamicToolSpecs });
+      await agent.startSession({ cwd: workspacePath, tools: this.deps.toolGateway.definitions() });
 
       let turnNumber = 0;
       while (turnNumber < cfg.agent.maxTurns) {
@@ -84,7 +84,7 @@ export class AgentRunner {
           },
           onToolCall: async (call): Promise<ToolResult> => {
             this.deps.log.debug(`tool_call: ${call.name}`, { issue: issue.identifier });
-            return await linearGraphql(call);
+            return await this.deps.toolGateway.handle(call);
           },
         });
 

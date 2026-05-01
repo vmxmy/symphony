@@ -8,6 +8,7 @@ import type { WorkspaceManager } from "./workspace.js";
 import { State, nextBackoffMs } from "./state.js";
 import { AgentRunner } from "./agent.js";
 import type { AgentFactory } from "./agent/types.js";
+import type { ToolGateway } from "./contracts/tools.js";
 import { PromptBuilder } from "./prompt.js";
 
 export class Orchestrator {
@@ -24,6 +25,7 @@ export class Orchestrator {
       log: Logger;
       config: () => WorkflowConfig;
       agentFactory: AgentFactory;
+      toolGateway: ToolGateway;
     },
   ) {}
 

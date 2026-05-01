@@ -3,6 +3,7 @@
 
 import type { LinearClient } from "./linear.js";
 import type { ToolDefinition, ToolResult, ToolCall } from "./agent/types.js";
+import type { ToolGateway } from "./contracts/tools.js";
 
 export const LINEAR_GRAPHQL_TOOL_NAME = "linear_graphql";
 
@@ -61,3 +62,31 @@ export function makeLinearGraphqlHandler(client: LinearClient) {
 }
 
 export const symphonyDynamicToolSpecs: ToolDefinition[] = [linearGraphqlSpec];
+
+/**
+ * ToolGateway implementation backed by the Linear GraphQL handler. Phase 1
+ * replacement for the inline linear_graphql wiring in AgentRunner; preserves
+ * the tool name, schema, and success/error result shapes byte-for-byte.
+ *
+ * Future Cloudflare ToolGatewayAgent / McpAgent implementations satisfy the
+ * same contract while adding policy, audit, approvals, and MCP fan-out.
+ */
+export class LinearToolGateway implements ToolGateway {
+  private readonly handler: (call: ToolCall) => Promise<ToolResult>;
+
+  constructor(client: LinearClient) {
+    this.handler = makeLinearGraphqlHandler(client);
+  }
+
+  definitions(): ToolDefinition[] {
+    return symphonyDynamicToolSpecs;
+  }
+
+  handle(call: ToolCall): Promise<ToolResult> {
+    return this.handler(call);
+  }
+}
+
+export function makeLinearToolGateway(client: LinearClient): ToolGateway {
+  return new LinearToolGateway(client);
+}
