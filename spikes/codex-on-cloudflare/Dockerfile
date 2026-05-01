@@ -26,5 +26,10 @@ ENV PORT=8080 \
 
 EXPOSE 8080
 
-# Bridge runs as PID 1; codex is spawned per request (spike v0).
+# Cache-bust marker. Bump when the bridge contract changes so Wrangler
+# uploads a new image instead of dedup-skipping by manifest hash.
+ENV BRIDGE_REVISION=v1-persistent-2026-05-01
+
+# Bridge runs as PID 1; codex is spawned once and the thread persists
+# across /run-turn calls until /reset or container shutdown (spike v1).
 CMD ["node", "/app/server.mjs"]
