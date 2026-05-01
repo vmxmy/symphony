@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# symphony-launch: profile-based launcher for Symphony orchestrator.
+#
+# Lives in <repo>/bin/symphony-launch. Auto-detects:
+#   - SYMPHONY_BIN  : <repo>/elixir/bin/symphony  (override via env)
+#   - PROFILES_ROOT : <repo>/profiles             (override via env)
+#
+# Usage: symphony-launch <command> [profile]
+set -euo pipefail
+
+# ---- bootstrap paths ------------------------------------------------------
+
+# Resolve script's real path (handles symlinks)
+script_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -h "$src" ]; do
+    local d
+    d=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    [[ "$src" != /* ]] && src="$d/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+LAUNCHER_DIR="$(script_path)"
+REPO_ROOT="$(cd "$LAUNCHER_DIR/.." && pwd)"
+
+PROFILES_ROOT="${SYMPHONY_PROFILES_ROOT:-$REPO_ROOT/profiles}"
+SYMPHONY_BIN="${SYMPHONY_BIN:-$REPO_ROOT/elixir/bin/symphony}"
+
+CMD="${1:-help}"
+PROFILE="${2:-}"
+
+# ---- helpers --------------------------------------------------------------
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+info() { echo "→ $*"; }
+ok()   { echo "  ✓ $*"; }
+fail() { echo "  ✗ $*" >&2; }
+
+profile_dir() {
+  local p="$1"
+  echo "$PROFILES_ROOT/$p"
+}
+
+require_profile() {
+  [ -n "$PROFILE" ] || die "profile name required"
+  [ -d "$(profile_dir "$PROFILE")" ] || die "profile not found: $PROFILE"
+}
+
+# Read a YAML field via python (no yq dependency)
+yaml_get() {
+  local file="$1" path="$2"
+  python3 -c "
+import yaml, sys
+with open('$file') as f:
+    d = yaml.safe_load(f)
+parts = '$path'.split('.')
+for p in parts:
+    if isinstance(d, dict):
+        d = d.get(p)
+    elif isinstance(d, list):
+        try: d = d[int(p)]
+        except: d = None
+    if d is None:
+        sys.exit(0)
+print(d if not isinstance(d, (dict, list)) else yaml.dump(d).strip())
+"
+}
+
+pid_file() {
+  echo "$(profile_dir "$1")/runtime/symphony.pid"
+}
+
+is_running() {
+  local pid_f
+  pid_f=$(pid_file "$1")
+  [ -f "$pid_f" ] && kill -0 "$(cat "$pid_f")" 2>/dev/null
+}
+
+# Detect whether we should wrap with `mise exec` (auto, no profile field needed)
+needs_mise() {
+  # Symphony binary is an escript; it requires erlang on PATH at runtime.
+  # If `escript` is on PATH, we don't need mise. Otherwise, if mise is installed
+  # and the repo's elixir/ has a mise.toml, wrap with mise.
+  if command -v escript >/dev/null 2>&1; then
+    return 1
+  fi
+  if command -v mise >/dev/null 2>&1 && [ -f "$REPO_ROOT/elixir/mise.toml" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ---- commands -------------------------------------------------------------
+
+cmd_list() {
+  echo "Repo:     $REPO_ROOT"
+  echo "Profiles: $PROFILES_ROOT"
+  echo "Engine:   $SYMPHONY_BIN"
+  echo
+  printf "  %-25s %-10s %-8s %s\n" "NAME" "STATUS" "PORT" "DESCRIPTION"
+  printf "  %-25s %-10s %-8s %s\n" "----" "------" "----" "-----------"
+  for d in "$PROFILES_ROOT"/*/; do
+    [ -f "$d/profile.yaml" ] || continue
+    local name port desc status
+    name=$(basename "$d")
+    [[ "$name" == _* ]] && continue   # skip _template
+    port=$(yaml_get "$d/profile.yaml" symphony.port 2>/dev/null || echo "?")
+    desc=$(yaml_get "$d/profile.yaml" description 2>/dev/null | head -c 50)
+    if is_running "$name"; then
+      status="RUNNING"
+    else
+      status="stopped"
+    fi
+    printf "  %-25s %-10s %-8s %s\n" "$name" "$status" ":$port" "$desc"
+  done
+}
+
+cmd_check() {
+  require_profile
+  local PD; PD=$(profile_dir "$PROFILE")
+  info "Profile: $PROFILE"
+  info "Dir: $PD"
+
+  # 0. Symphony binary present
+  [ -x "$SYMPHONY_BIN" ] || { fail "Symphony binary not found at $SYMPHONY_BIN"; return 1; }
+  ok "Symphony binary: $SYMPHONY_BIN"
+
+  # 1. Profile.yaml
+  [ -f "$PD/profile.yaml" ] || { fail "profile.yaml missing"; return 1; }
+  ok  "profile.yaml present"
+
+  # 2. WORKFLOW.md
+  [ -f "$PD/WORKFLOW.md" ] || { fail "WORKFLOW.md missing"; return 1; }
+  python3 -c "
+import yaml, sys
+with open('$PD/WORKFLOW.md') as f:
+    parts = f.read().split('---', 2)
+if len(parts) < 3: sys.exit('no YAML frontmatter')
+yaml.safe_load(parts[1])" 2>/dev/null && ok "WORKFLOW.md YAML valid" || { fail "WORKFLOW.md invalid"; return 1; }
+
+  # 3. env file
+  if [ -f "$PD/env" ]; then
+    ok "env file present"
+    set -a; source "$PD/env"; set +a
+  else
+    fail "env file missing (copy env.example to env and fill credentials)"
+    return 1
+  fi
+
+  # 4. Required env vars
+  local missing=()
+  while IFS= read -r v; do
+    [ -z "$v" ] && continue
+    [ -n "${!v:-}" ] || missing+=("$v")
+  done < <(yaml_get "$PD/profile.yaml" preflight.env_required | grep -E '^- ' | sed 's/^- //')
+  if [ ${#missing[@]} -gt 0 ]; then
+    fail "missing env vars: ${missing[*]}"
+    return 1
+  fi
+  ok "all required env vars set"
+
+  # 5. Required skills (in profile/skills/)
+  local skill_missing=()
+  while IFS= read -r s; do
+    [ -z "$s" ] && continue
+    [ -d "$PD/skills/$s" ] || skill_missing+=("$s")
+  done < <(yaml_get "$PD/profile.yaml" preflight.skills_required | grep -E '^- ' | sed 's/^- //')
+  if [ ${#skill_missing[@]} -gt 0 ]; then
+    fail "missing skills: ${skill_missing[*]}"
+    return 1
+  fi
+  ok "all required skills present"
+
+  # 6. codex-home structure
+  for f in config.toml auth.json skills; do
+    [ -e "$PD/codex-home/$f" ] || { fail "codex-home/$f missing"; return 1; }
+  done
+  ok "codex-home structure ready"
+
+  ok "preflight passed for $PROFILE"
+}
+
+cmd_start() {
+  require_profile
+  local PD; PD=$(profile_dir "$PROFILE")
+
+  if is_running "$PROFILE"; then
+    info "$PROFILE already running (PID $(cat "$(pid_file "$PROFILE")"))"
+    return 0
+  fi
+
+  cmd_check || die "preflight failed"
+
+  # load env
+  set -a; source "$PD/env"; set +a
+
+  # parameters from profile
+  local PORT WS_ROOT BYPASS
+  PORT=$(yaml_get "$PD/profile.yaml" symphony.port)
+  WS_ROOT=$(yaml_get "$PD/profile.yaml" symphony.workspace_root | sed "s|^~|$HOME|")
+  BYPASS=$(yaml_get "$PD/profile.yaml" symphony.bypass_guardrails)
+
+  # ensure dirs
+  mkdir -p "$WS_ROOT" "$PD/runtime/log" "$PD/runtime/sessions"
+
+  # CODEX_HOME -> profile-isolated codex
+  export CODEX_HOME="$PD/codex-home"
+
+  # build symphony command (engine binary + profile WORKFLOW.md)
+  local cmd=("$SYMPHONY_BIN" "$PD/WORKFLOW.md"
+    --port "$PORT"
+    --logs-root "$PD/runtime/log")
+  if [ "$BYPASS" = "True" ] || [ "$BYPASS" = "true" ]; then
+    cmd+=(--i-understand-that-this-will-be-running-without-the-usual-guardrails)
+  fi
+
+  # auto-wrap with mise if escript not on PATH
+  if needs_mise; then
+    cmd=(mise exec -- "${cmd[@]}")
+  fi
+
+  info "starting Symphony for profile=$PROFILE port=$PORT"
+  info "CODEX_HOME=$CODEX_HOME"
+  info "engine: $SYMPHONY_BIN"
+
+  # cd into elixir/ so mise picks up mise.toml
+  cd "$REPO_ROOT/elixir"
+  nohup "${cmd[@]}" > "$PD/runtime/log/launcher.out" 2>&1 &
+  local pid=$!
+  echo "$pid" > "$(pid_file "$PROFILE")"
+
+  # wait for HTTP up
+  for _ in $(seq 1 20); do
+    if curl -s -o /dev/null "http://127.0.0.1:$PORT/api/v1/state"; then
+      ok "started PID=$pid, dashboard http://127.0.0.1:$PORT/"
+      return 0
+    fi
+    sleep 1
+  done
+  fail "Symphony did not respond on :$PORT after 20s; check $PD/runtime/log/"
+  return 1
+}
+
+cmd_stop() {
+  require_profile
+  local pid_f; pid_f=$(pid_file "$PROFILE")
+  if [ ! -f "$pid_f" ]; then
+    info "$PROFILE not tracked (no pid file)"
+    return 0
+  fi
+  local pid; pid=$(cat "$pid_f")
+  if kill -0 "$pid" 2>/dev/null; then
+    info "stopping PID $pid"
+    kill "$pid"
+    for _ in $(seq 1 10); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 0.5
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      fail "did not exit cleanly, sending SIGKILL"
+      kill -9 "$pid"
+    fi
+  fi
+  rm -f "$pid_f"
+  ok "stopped"
+}
+
+cmd_restart() {
+  cmd_stop
+  cmd_start
+}
+
+cmd_status() {
+  if [ -n "$PROFILE" ]; then
+    require_profile
+    local PD PORT
+    PD=$(profile_dir "$PROFILE")
+    PORT=$(yaml_get "$PD/profile.yaml" symphony.port)
+    if is_running "$PROFILE"; then
+      echo "$PROFILE: RUNNING (PID $(cat "$(pid_file "$PROFILE")"), :$PORT)"
+      curl -s "http://127.0.0.1:$PORT/api/v1/state" 2>/dev/null | python3 -m json.tool 2>/dev/null | head -25 || echo "(API unreachable)"
+    else
+      echo "$PROFILE: stopped"
+    fi
+  else
+    cmd_list
+  fi
+}
+
+cmd_help() {
+  cat <<EOF
+symphony-launch: profile-based Symphony launcher
+
+Usage:
+  symphony-launch <command> [profile]
+
+Commands:
+  list                  List all profiles + their status
+  check <profile>       Run preflight checks (engine + env + skills + codex-home)
+  start <profile>       Start Symphony for the profile
+  stop <profile>        Stop Symphony
+  restart <profile>     Stop then start
+  status [profile]      Show status (no profile = list)
+  help                  This help
+
+Auto-detected paths (override via env vars):
+  REPO_ROOT             $REPO_ROOT
+  SYMPHONY_BIN          $SYMPHONY_BIN
+  PROFILES_ROOT         $PROFILES_ROOT
+
+Profiles live at \$PROFILES_ROOT/<name>/ with:
+  - profile.yaml         metadata + Linear/Symphony/preflight config
+  - WORKFLOW.md          Symphony pipeline definition
+  - env                  API credentials (gitignored)
+  - env.example          credentials template
+  - skills/              profile-specific Codex skills
+  - codex-home/          CODEX_HOME isolation
+  - runtime/             PID + log + sessions (gitignored)
+EOF
+}
+
+# ---- dispatch -------------------------------------------------------------
+
+case "$CMD" in
+  list)    cmd_list ;;
+  check)   cmd_check ;;
+  start)   cmd_start ;;
+  stop)    cmd_stop ;;
+  restart) cmd_restart ;;
+  status)  cmd_status ;;
+  help|-h|--help) cmd_help ;;
+  *)       cmd_help; exit 1 ;;
+esac

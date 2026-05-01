@@ -1,0 +1,73 @@
+# ============================================================
+# Symphony fork .gitignore
+# ============================================================
+
+# Re-include bin/ which is excluded by some users' global gitignore
+!bin/
+!bin/*
+
+# Compiled binaries are build artifacts (run `bun build --compile`), not source
+bin/symphony-ts
+
+# Bun build temp files
+ts-engine/.*-bun-build
+ts-engine/.*.bun-build*
+
+# Local agent / IDE config that shouldn't enter the fork
+AGENTS.md
+.claude/
+.codex/skills/openspec-*/
+openspec/
+
+# Per-profile secrets (committed: env.example only)
+profiles/*/env
+
+# Per-profile runtime artifacts (PIDs, logs, sessions)
+profiles/*/runtime/
+
+# Per-profile codex-home volatile state
+profiles/*/codex-home/sessions/
+profiles/*/codex-home/generated_images/
+profiles/*/codex-home/auth.json
+profiles/*/codex-home/installation_id
+profiles/*/codex-home/.personality_migration
+profiles/*/codex-home/logs_*.sqlite*
+profiles/*/codex-home/state_*.sqlite*
+profiles/*/codex-home/history.jsonl
+profiles/*/codex-home/memories/
+profiles/*/codex-home/tmp/
+profiles/*/codex-home/.tmp/
+profiles/*/codex-home/session_index.jsonl
+profiles/*/codex-home/shell_snapshots/
+profiles/*/codex-home/archived_sessions/
+profiles/*/codex-home/internal_storage.json
+profiles/*/codex-home/plugins/
+
+# Symphony engine local artifacts (kept out of fork)
+elixir/_build/
+elixir/deps/
+elixir/log/
+elixir/.elixir_ls/
+elixir/.fetch
+elixir/erl_crash.dump
+elixir/cover/
+
+# Local backup / scratch
+*.bak
+*.bak.*
+*.notes
+WORKFLOW.md.bak.*
+WORKFLOW.md.notes
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local-only oh-my-* state
+.omc/
+.omx/
+elixir/.omc/
+elixir/.omx/

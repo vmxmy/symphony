@@ -1,0 +1,23 @@
+{
+  "skill_name": "mptext-api",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "下载这篇公众号文章为 markdown 格式：https://mp.weixin.qq.com/s/d067bWUdhqYwvfehoYKtVw",
+      "expected_output": "执行 curl 请求获取 markdown 格式的文章内容",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "搜索名为「xx」公众号的 fakeid，然后获取它的历史文章列表",
+      "expected_output": "先调用搜索接口，再调用文章列表接口，分页获取文章",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我有公众号的 fakeid，想查询它的主体信息，应该用哪个接口？需要认证吗？",
+      "expected_output": "指出接口5（authorinfo）或接口6（aboutbiz），说明认证要求",
+      "files": []
+    }
+  ]
+}
