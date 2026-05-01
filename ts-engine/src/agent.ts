@@ -39,13 +39,19 @@ export class AgentRunner {
     usage: Record<string, unknown>,
     accum: TokenUsage,
   ): void {
+    // Codex sends thread/tokenUsage/updated as:
+    //   params.tokenUsage.total = {totalTokens, inputTokens, cachedInputTokens, outputTokens, reasoningOutputTokens}
+    // earlier shapes (camel/snake/wrapped) are kept as fallbacks for safety.
+    const tu = usage.tokenUsage as Record<string, unknown> | undefined;
     const u: Record<string, unknown> =
+      (tu?.total as Record<string, unknown>) ??
+      (tu as Record<string, unknown>) ??
       (usage.usage as Record<string, unknown>) ??
       (usage.tokens as Record<string, unknown>) ??
       usage;
-    const total = num(u.totalTokens) + num(u.total_tokens) + num(u.total);
-    const inT = num(u.inputTokens) + num(u.input_tokens) + num(u.input);
-    const outT = num(u.outputTokens) + num(u.output_tokens) + num(u.output);
+    const total = num(u.totalTokens) + num(u.total_tokens);
+    const inT = num(u.inputTokens) + num(u.input_tokens);
+    const outT = num(u.outputTokens) + num(u.output_tokens);
     if (total === 0 && inT === 0 && outT === 0) return;
     accum.totalTokens = Math.max(accum.totalTokens, total);
     accum.inputTokens = Math.max(accum.inputTokens, inT);

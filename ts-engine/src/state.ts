@@ -23,6 +23,15 @@ export class State {
   // ---- snapshot (HTTP /api/v1/state) -------------------------------------
 
   snapshot() {
+    // codex_totals = completed sessions + in-flight (so dashboard shows live spend)
+    let runningTotal = 0;
+    let runningInput = 0;
+    let runningOutput = 0;
+    for (const r of this.running.values()) {
+      runningTotal += r.tokens.totalTokens;
+      runningInput += r.tokens.inputTokens;
+      runningOutput += r.tokens.outputTokens;
+    }
     return {
       running: [...this.running.values()],
       retrying: [...this.retrying.values()].map((r) => ({
@@ -30,9 +39,9 @@ export class State {
         // launcher-friendly fields
       })),
       codex_totals: {
-        total_tokens: this.codexTotals.totalTokens,
-        input_tokens: this.codexTotals.inputTokens,
-        output_tokens: this.codexTotals.outputTokens,
+        total_tokens: this.codexTotals.totalTokens + runningTotal,
+        input_tokens: this.codexTotals.inputTokens + runningInput,
+        output_tokens: this.codexTotals.outputTokens + runningOutput,
         seconds_running: this.codexTotals.secondsRunning,
       },
       counts: {

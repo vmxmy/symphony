@@ -223,6 +223,14 @@ export class CodexAppServer {
     const params = (msg.params ?? {}) as Record<string, unknown>;
     if (!method) return;
 
+    // diagnostic: surface every method + token-shaped params for debugging
+    if (process.env.SYMPHONY_DEBUG_CODEX) {
+      this.log.debug(`codex notif: ${method}`);
+    }
+    if (method.includes("oken") || method.includes("ateLimit") || method.includes("usage")) {
+      this.log.info(`codex notif method=${method} params=${JSON.stringify(params).slice(0, 600)}`);
+    }
+
     this.currentHandlers?.onAnyNotification?.(method, params);
 
     switch (method) {
