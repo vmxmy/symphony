@@ -29,6 +29,7 @@ import { LinearGraphqlClient } from "./tracker/linear.js";
 import type { LinearTrackerConfig } from "./tracker/types.js";
 import { extractLinearTrackerConfig } from "./tracker/config.js";
 import { assertControlPlaneId, durableObjectName } from "./identity.js";
+import { runScheduledPoll } from "./orchestration/scheduled_poll.js";
 
 export { TenantAgent, ProjectAgent };
 
@@ -557,9 +558,48 @@ export default {
           return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
         }
       }
+
+      // ---- admin: run the scheduled poll on demand (Phase 3 cron mirror) ----
+      // Same poll path the cron trigger uses; here for testing without waiting
+      // for the next tick. Reuses write:project.refresh capability since this
+      // is "refresh all projects" semantically.
+      if (url.pathname === "/api/v1/admin/run-scheduled") {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:project.refresh");
+        if (denied) return denied;
+        const summary = await runScheduledPoll(env);
+        return jsonResponse(summary);
+      }
     }
 
     return notFound();
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    // Cron trigger fires every 5 minutes (see wrangler.toml [triggers]).
+    // We log the summary for `wrangler tail` visibility; a future commit
+    // can persist it to D1 (e.g. as a system-level run_event) once we
+    // decide on a "scheduler run" model.
+    ctx.waitUntil(
+      runScheduledPoll(env).then(
+        (summary) => {
+          console.log(
+            JSON.stringify({
+              kind: "scheduled_poll",
+              ...summary,
+            }),
+          );
+        },
+        (err) => {
+          console.error(
+            JSON.stringify({
+              kind: "scheduled_poll_error",
+              error: String((err as Error)?.message ?? err),
+            }),
+          );
+        },
+      ),
+    );
   },
 };
 

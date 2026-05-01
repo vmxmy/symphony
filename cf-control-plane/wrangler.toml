@@ -58,3 +58,17 @@ new_sqlite_classes = ["TenantAgent", "ProjectAgent"]
 # [[queues.producers]]
 # binding = "DISPATCH"
 # queue = "symphony-dispatch"
+
+# ---------------------------------------------------------------------------
+# Cron Triggers: scheduled ProjectAgent polling. Phase 3 second cut.
+# Every 5 minutes the Worker's scheduled() handler enumerates active
+# profiles (status = 'active', archived_at IS NULL) and calls
+# ProjectAgent.poll on each. Mirrors tracker state into D1; does NOT
+# start runs (Phase 3 invariant). Disable polling for an individual
+# project via POST /api/v1/projects/:t/:s/actions/{pause,drain}.
+#
+# Manual trigger for testing without waiting for the cron:
+#   POST /api/v1/admin/run-scheduled  (gated by Bearer)
+# ---------------------------------------------------------------------------
+[triggers]
+crons = ["*/5 * * * *"]
