@@ -488,3 +488,91 @@ Decision: keep `VpsDockerWorkspace` as the dev default and as the Phase 7
 Codex compatibility substrate. `CloudflareContainerWorkspace` waits on the
 §13.5 CA/TLS resolution before it can be promoted from "infra-only" to
 "production-capable" on the WorkerHost matrix.
+
+## 14. §13.5 TLS timebox attempt (followup)
+
+Run date: 2026-05-01 later same session
+Timebox budget: 30–60 min per `omc ask codex` advice.
+Outcome: **inconclusive — blocked on CF deploy state, not on the TLS hypothesis**.
+
+### 14.1 Changes attempted
+
+- `Dockerfile`: added `ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+  and `ENV SSL_CERT_DIR=/etc/ssl/certs`. The Codex Rust HTTP stack should
+  consult these if it falls back through the rustls-native-certs path.
+- `Dockerfile`: bumped `BRIDGE_REVISION` from `v1-persistent-2026-05-01`
+  to `v2-tls-cert-env-2026-05-01` so wrangler computes a new manifest
+  hash and pushes a new image (per §13.4).
+- `src/worker.ts`: bumped `CONTAINER_INSTANCE_NAME` from
+  `persistent-bridge-v1` to `persistent-bridge-v2-tls` so a fresh
+  Durable Object instance materializes a fresh Container with the new
+  image (also per §13.4).
+
+### 14.2 Deploy outcome
+
+Wrangler deploy succeeded:
+
+```text
+image switched: :fdff8d96 -> :659ed7a1
+Current Version ID: 659ed7a1-8243-45c1-af22-155ea1952ec3
+```
+
+Probe results:
+
+```text
+GET  /healthz  -> 200 ok
+POST /reset    -> 404 not found     (expected 200 with new bridge)
+POST /reset    -> 404 not found     (retry after 3s warm-up)
+```
+
+`/reset` 404 means the running Container is still serving the OLD
+spawn-per-request bridge despite a fresh DO instance name and a confirmed
+new image tag in the worker config. This is the same deploy-state inversion
+class observed in §13.4 deploys 1–3, except this time §13.4's reliable
+work-around (bump `BRIDGE_REVISION` + bump `CONTAINER_INSTANCE_NAME`
+together) did not produce a fresh Container in time to validate the SSL
+hypothesis.
+
+Either the Container product retains some routing state across DO instance
+name changes, or wrangler's deploy diff is reporting an image change while
+serving a prior container version. The result is that we could not
+reach a "model call passes / model call still fails" answer on the SSL
+fix within the timebox.
+
+### 14.3 What this rules out and rules in
+
+Rules in (still possible):
+
+- `SSL_CERT_FILE` / `SSL_CERT_DIR` env vars MAY fix `no native root CA
+  certificates found`. Untested; image is built and ready, just not
+  reachable through the current CF Container routing.
+
+Rules out:
+
+- Nothing about codex's TLS resolution behavior is concluded.
+
+### 14.4 Operator next-attempt checklist
+
+1. `wrangler container delete` (or remove the application stanza, deploy,
+   re-add, deploy) to reset CF-side container state. The current
+   incremental deploy path appears to retain stale routing.
+2. After a clean container application redeploy, verify
+   `POST /reset -> 200` before running any model smoke. `/reset` is the
+   load-bearing canary that proves the new bridge image is actually
+   being served.
+3. If `/reset` returns 200 and `bun run scripts/smoke.ts` still fails on
+   the same `no native root CA certificates found` stderr line, the SSL
+   env-var fix is wrong and the next theory to test is AI Gateway
+   routing (`https://gateway.ai.cloudflare.com/...` as the codex provider
+   `base_url`), per `docs/cloudflare-platform-limits.md` future hardening
+   options.
+4. If `/reset` returns 200 and the smoke passes, update §13.5 / §13.6
+   with the new substrate matrix entry.
+
+### 14.5 Decision
+
+`VpsDockerWorkspace` remains the only Codex execution substrate validated
+end-to-end. `CloudflareContainerWorkspace` is still gated on the §13.5 CF
+TLS finding, which itself is now also gated on a §14 CF Container deploy
+reset. Per ADR-0001, neither situation triggers Phase 10 native CodingAgent
+work; both remain WorkerHost-substrate concerns.

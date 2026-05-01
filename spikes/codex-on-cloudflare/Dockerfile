@@ -22,13 +22,15 @@ COPY container/server.mjs /app/server.mjs
 ENV PORT=8080 \
     CODEX_HOME=/data/codex-home \
     WORKSPACE=/data/workspace \
-    CODEX_BIN=codex
+    CODEX_BIN=codex \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_DIR=/etc/ssl/certs
 
 EXPOSE 8080
 
 # Cache-bust marker. Bump when the bridge contract changes so Wrangler
 # uploads a new image instead of dedup-skipping by manifest hash.
-ENV BRIDGE_REVISION=v1-persistent-2026-05-01
+ENV BRIDGE_REVISION=v2-tls-cert-env-2026-05-01
 
 # Bridge runs as PID 1; codex is spawned once and the thread persists
 # across /run-turn calls until /reset or container shutdown (spike v1).
