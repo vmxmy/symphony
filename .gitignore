@@ -66,3 +66,8 @@ WORKFLOW.md.notes
 
 # Track spike Docker context filters even if a global gitignore ignores them.
 !spikes/codex-on-cloudflare/.dockerignore
+
+# Track sub-package gitignores even if the user's global *.gitignore rule
+# would normally hide them.
+!spikes/codex-on-cloudflare/.gitignore
+!cf-control-plane/.gitignore

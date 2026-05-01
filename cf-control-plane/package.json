@@ -1,0 +1,19 @@
+{
+  "name": "symphony-control-plane",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "db:create": "wrangler d1 create symphony-control-plane",
+    "db:migrate:local": "wrangler d1 migrations apply symphony-control-plane --local",
+    "db:migrate:remote": "wrangler d1 migrations apply symphony-control-plane --remote",
+    "db:list:local": "wrangler d1 migrations list symphony-control-plane --local",
+    "db:list:remote": "wrangler d1 migrations list symphony-control-plane --remote",
+    "db:tables": "wrangler d1 execute symphony-control-plane --remote --command \"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' AND name NOT LIKE '_cf_%' ORDER BY name\""
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250410.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.87.0"
+  }
+}

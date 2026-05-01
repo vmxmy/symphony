@@ -1,0 +1,40 @@
+name = "symphony-control-plane"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Worker entrypoint is intentionally absent in this Phase 2 first-cut. We
+# start with D1 schema only; Worker / Agents / Workflows wiring lands in
+# subsequent commits once the schema is stable. To re-enable Worker deploy:
+#
+#   main = "src/worker.ts"
+#
+# and add the Worker routes/Access policy.
+
+# ---------------------------------------------------------------------------
+# D1: control-plane index database (tenants, profiles, issues, runs, events,
+# tool_calls, approvals, idempotency_records). See migrations/0001_init.sql.
+# ---------------------------------------------------------------------------
+[[d1_databases]]
+binding = "DB"
+database_name = "symphony-control-plane"
+# database_id is filled in by `bun run db:create` (or wrangler d1 create) and
+# then committed. Until set, only `--local` migrations work.
+database_id = "da72ce20-3e3d-4cf6-bc66-4d9aa71862f1"
+migrations_dir = "migrations"
+
+# ---------------------------------------------------------------------------
+# R2: artifact bucket for run bundles, transcripts, snapshots, tool payloads.
+# Provisioned in a follow-up; placeholder kept here so the binding shape is
+# documented next to the D1 binding.
+# ---------------------------------------------------------------------------
+# [[r2_buckets]]
+# binding = "ARTIFACTS"
+# bucket_name = "symphony-runs"
+
+# ---------------------------------------------------------------------------
+# Queues: dispatch / events / cleanup transport. See target.md §11.
+# Provisioned with the Worker entrypoint, not in this commit.
+# ---------------------------------------------------------------------------
+# [[queues.producers]]
+# binding = "DISPATCH"
+# queue = "symphony-dispatch"
