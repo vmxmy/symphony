@@ -6,13 +6,13 @@ Scope: Migrate the current TypeScript-only Symphony architecture toward a Cloudf
 
 ## 1. Executive Summary
 
-Symphony should move from a local long-running Bun daemon that polls Linear and launches `codex app-server` in local workspaces to a Cloudflare-native control plane built around Cloudflare Agents, Workflows, Workers, Sandbox/Containers, D1, R2, Queues, Access, and Analytics Engine.
+Symphony should move from a local long-running Bun daemon that polls Linear and launches `codex app-server` in local workspaces to a Cloudflare-native control plane built around Cloudflare Agents, Workflows, Workers, D1, R2, Queues, Access, and Analytics Engine, plus a pluggable WorkerHost execution plane for isolated coding workspaces.
 
 The target is not "Elixir on Cloudflare" and not "lift the current daemon into one Worker." Elixir is already deprecated and removed from the active architecture. The target is a Cloudflare-native decomposition:
 
 - Cloudflare Agents own durable per-tenant, per-project, and per-issue state.
 - Cloudflare Workflows own long-running, retryable execution paths.
-- Cloudflare Sandbox SDK or Containers own isolated coding workspaces.
+- WorkerHost implementations own isolated coding workspaces: VPS Docker for the current dev loop, Cloudflare Containers/Sandbox for managed Cloudflare execution, and local Docker for compatibility debugging.
 - D1 stores normalized control-plane records and queryable history.
 - R2 stores large artifacts, logs, transcripts, workspace snapshots, and run bundles.
 - Queues decouple polling, webhooks, dispatch, execution events, and cleanup.
@@ -20,7 +20,7 @@ The target is not "Elixir on Cloudflare" and not "lift the current daemon into o
 - Analytics Engine stores high-cardinality runtime metrics.
 - Linear becomes an optional tracker adapter, not a required core dependency.
 
-The first production cut should keep Codex compatibility by running `codex app-server` inside Cloudflare-managed isolation. The later native cut can replace Codex process execution with Cloudflare Agents SDK tool orchestration, MCP Agent tools, AI Gateway routing, and Cloudflare-native coding-agent capabilities when those surfaces are mature enough for the required workload.
+The first production cut should keep Codex compatibility by running `codex app-server` inside a WorkerHost. The current development WorkerHost is VPS Docker on `dev@74.48.189.45`; Cloudflare Containers/Sandbox remain the managed Cloudflare execution options. The later native cut can replace Codex process execution with Cloudflare Agents SDK tool orchestration, MCP Agent tools, AI Gateway routing, and Cloudflare-native coding-agent capabilities when those surfaces are mature enough for the required workload.
 
 ## 2. Current Baseline
 
@@ -62,7 +62,7 @@ This is the RALPLAN-DR planning baseline.
 1. Cloudflare-native core: orchestration state, schedules, durable steps, storage, dashboard, and auth should live on Cloudflare services.
 2. Adapter boundaries over product lock-in: Linear, Codex, GitHub, MCP, and future trackers/tools must be replaceable behind stable interfaces.
 3. Durable issue ownership: a single issue/run must have one authoritative Cloudflare Agent owner to avoid duplicate dispatch and split-brain retries.
-4. Execution isolation first: untrusted code, shell hooks, repo checkouts, tests, and generated artifacts must run in Sandbox/Containers, never directly in a control-plane Worker.
+4. Execution isolation first: untrusted code, shell hooks, repo checkouts, tests, and generated artifacts must run in a WorkerHost adapter, never directly in a control-plane Worker.
 5. Observable and replayable by default: every decision, tool call, workflow step, token event, artifact pointer, and state transition must be persisted or reconstructable.
 
 ## 4. Decision Drivers
@@ -78,7 +78,7 @@ Top drivers, in order:
 | Option | Summary | Pros | Cons | Verdict |
 |---|---|---|---|---|
 | A. Lift current Bun engine into one Worker/Container | Package the daemon as-is and run it on Cloudflare | Fastest compatibility path; minimal rewrite | Preserves monolith, local process assumptions, weak native state model; still couples orchestration to process lifetime | Reject as final target; useful only as temporary escape hatch |
-| B. Cloudflare-native Agents + Workflows + Sandbox/Containers | Decompose orchestration into Agents, durable steps into Workflows, execution into isolated workspaces | Best fit for durable orchestration, state ownership, scale-out, observability, and Cloudflare-native operations | More design work; requires adapters and migration phases | Chosen target |
+| B. Cloudflare-native Agents + Workflows + pluggable WorkerHosts | Decompose orchestration into Agents, durable steps into Workflows, execution into isolated workspace adapters | Best fit for durable orchestration, state ownership, scale-out, observability, and Cloudflare-native operations while allowing VPS Docker for cost-sensitive execution | More design work; requires adapters and migration phases | Chosen target |
 | C. Keep Linear/Codex as permanent required core | Move hosting to Cloudflare but retain external tracker and Codex process as mandatory | Lowest behavior risk; current user workflow preserved | Not 100% Cloudflare native; Linear remains a hard dependency; Cloudflare Agents underused | Reject as final target; keep as compatibility mode |
 | D. Build only a Cloudflare-native task tracker and drop Linear immediately | D1/Agents own all issues, no external tracker compatibility | Cleanest Cloudflare-only core | High cutover risk; loses current Linear workflow and live issue metadata | Defer until after adapter parity |
 
@@ -118,7 +118,7 @@ Chosen path: Option B, with compatibility bridges for Linear and Codex during ea
                                      | runWorkflow
                                      v
 +------------------+        +--------+----------------+        +----------------------+
-| ToolGatewayAgent |<------>+ ExecutionWorkflow       +------->+ Sandbox or Container |
+| ToolGatewayAgent |<------>+ ExecutionWorkflow       +------->+ WorkerHost adapter   |
 | MCP/tools/audit  |        | durable issue run steps |        | workspace + commands |
 +------------------+        +--------+----------------+        +----------+-----------+
                                      |                                      |
@@ -140,11 +140,58 @@ The control plane is Workers + Agents:
 
 ### Data Plane
 
-The data plane is Workflows + Sandbox/Containers:
+The data plane is Workflows + WorkerHosts:
 
 - ExecutionWorkflow is a durable multi-step workflow per issue run or continuation attempt.
-- Sandbox or Container provides isolated filesystem/process execution for repo checkout, hooks, tests, `codex app-server`, and generated artifacts.
+- A WorkerHost adapter provides isolated filesystem/process execution for repo checkout, hooks, tests, `codex app-server`, and generated artifacts.
 - ToolGatewayAgent mediates external tools and MCP calls, enforces allowlists, writes audit logs, and hides raw secrets from coding agents.
+
+### WorkerHost Abstraction
+
+WorkerHost is the execution-plane contract behind `WorkspaceAdapter`. It is deliberately outside the Cloudflare Agent state model: Agents and Workflows decide what should happen, while WorkerHosts provide the isolated Linux workspace where shell commands and coding agents actually run.
+
+```ts
+type WorkerHostKind =
+  | "vps_docker"
+  | "cloudflare_container"
+  | "cloudflare_sandbox"
+  | "local_docker";
+
+interface WorkerHost {
+  kind: WorkerHostKind;
+  prepare(input: PrepareWorkspaceInput): Promise<WorkspaceRef>;
+  runCommand(input: RunCommandInput): Promise<CommandResult>;
+  runCodexTurn(input: CodexTurnInput): Promise<CodexTurnResult>;
+  snapshot(input: SnapshotInput): Promise<ArtifactRef>;
+  cleanup(input: CleanupInput): Promise<void>;
+}
+```
+
+Current adapter decisions:
+
+- `VpsDockerWorkspace`: current development default on `dev@74.48.189.45`; validated with Codex `@openai/codex@0.128.0`, local third-party provider config, JSON-RPC streaming, and file writes.
+- `CloudflareContainerWorkspace`: hosted Cloudflare default when the execution plane must also be Cloudflare-managed.
+- `CloudflareSandboxWorkspace`: opt-in after parity testing proves persistent sessions, command-heavy agent loops, and artifact capture meet the runtime contract.
+- `LocalDockerWorkspace`: local compatibility/debug adapter, not the production default.
+
+#### Layering: WorkspaceAdapter and WorkerHost
+
+`WorkspaceAdapter` and `WorkerHost` are deliberately two layers, not two names for the same thing. Phase 1 already shipped `WorkspaceAdapter`; Phase 6 introduces `WorkerHost` underneath.
+
+| Layer | Phase | Contract | Owns |
+|---|---|---|---|
+| `WorkspaceAdapter` | Phase 1 (shipped) | `ts-engine/src/contracts/workspace.ts` — `ensure(issue)`, `pathFor(issue)`, `remove(issue)`, `runHook(name, ref)` | Per-issue workspace lifecycle, `WorkflowConfig.hooks` execution, identifier-to-path mapping |
+| `WorkerHost` | Phase 6 (upcoming) | `WorkerHost` interface in this section — `prepare`, `runCommand`, `runCodexTurn`, `snapshot`, `cleanup` | Substrate-level isolated execution: which Linux box hosts the workspace, how shell commands and Codex are spawned, how snapshots reach R2 |
+
+Phase 6 wiring rule:
+
+- The current `WorkspaceManager` (`ts-engine/src/workspace.ts`) is replaced by `WorkerHostBackedWorkspaceManager(host: WorkerHost)`. The new class still implements `WorkspaceAdapter`; control-plane callers (`Orchestrator`, `AgentRunner`) do not change.
+- `WorkerHostBackedWorkspaceManager.runHook(name, ref)` resolves the hook command from `WorkflowConfig.hooks` and forwards a `runCommand` call to `host.runCommand`. `runHook` does not become public-tool surface; it remains the profile's hook contract.
+- `host.runCodexTurn` is invoked by the future Codex compatibility adapter (Phase 7), not by hooks. `WorkspaceAdapter` callers never reach `runCodexTurn` directly.
+- `host.snapshot` is invoked by `ExecutionWorkflow` cleanup steps, not by `WorkspaceAdapter`. Snapshot-on-failure is workflow policy, not workspace API.
+- `WorkerHost.kind` selects the substrate per profile (`vps_docker`, `cloudflare_container`, `cloudflare_sandbox`, `local_docker`). Substrate choice never leaks into `WorkspaceAdapter` callers.
+
+Phase 1 callers therefore stay forward-compatible without code changes; Phase 6 simply provides a different concrete implementation behind the same contract.
 
 ### Storage Plane
 
@@ -158,11 +205,14 @@ The data plane is Workflows + Sandbox/Containers:
 
 These limits are pinned from Cloudflare docs as of 2026-05-01 and must be re-verified during Phase 0 before Phase 2 starts. If the account plan, beta access, or product documentation changes, the Phase 0 limits register becomes authoritative for implementation.
 
+The current Phase 0 limits register is `docs/cloudflare-platform-limits.md`.
+
 Default execution-substrate decision for planning:
 
-- Phase 6/7 default: Containers, because Codex compatibility needs a full Linux process environment, dependency installs, background process management, and predictable workspace semantics.
+- Current development default: `VpsDockerWorkspace` on `dev@74.48.189.45`, because the spike proved Codex app-server can use the same local third-party provider config, write files, and stream JSON-RPC events while avoiding Cloudflare Container runtime cost.
+- Hosted Cloudflare default: `CloudflareContainerWorkspace`, because Codex compatibility needs a full Linux process environment, dependency installs, background process management, and predictable workspace semantics.
 - Sandbox SDK: allowed as an opt-in execution adapter only after the Phase 0 spike proves Codex app-server, file operations, long-running process handling, and log/artifact capture work with acceptable limits.
-- Worker/control-plane code must treat Sandbox and Containers as different WorkspaceAdapter implementations, not as a behavior-free runtime flag.
+- Worker/control-plane code must treat VPS Docker, Cloudflare Containers, Cloudflare Sandbox, and Local Docker as different WorkspaceAdapter implementations, not as a behavior-free runtime flag.
 
 Pinned platform constraints:
 
@@ -180,7 +230,7 @@ Pinned platform constraints:
 Required Phase 0 outputs before Phase 2 code:
 
 1. `docs/cloudflare-platform-limits.md` with the account plan, enabled products, exact limits, requested limit increases, and source URLs.
-2. A selected default workspace substrate for Phase 6/7: `container`, `sandbox`, or `dual`, with evidence from a Codex app-server spike.
+2. A selected default workspace substrate for Phase 6/7: `vps_docker`, `cloudflare_container`, `cloudflare_sandbox`, or `dual`, with evidence from a Codex app-server spike.
 3. A workflow budget calculation for one representative issue run: expected steps, subrequests, R2 writes, D1 rows, queue messages, and container minutes.
 4. A fallback/rollback rule if the selected substrate cannot run Codex app-server reliably.
 
@@ -198,8 +248,8 @@ Required Phase 0 outputs before Phase 2 code:
 | `ts-engine/src/orchestrator.ts` | ProjectAgent + Queues + scheduled tasks | Poll/reconcile logic becomes durable and idempotent |
 | `ts-engine/src/state.ts` | IssueAgent state + D1 run state | Hot state in Agent; history in D1 |
 | `ts-engine/src/agent.ts` | ExecutionWorkflow + IssueAgent run state machine | Durable steps replace in-process loop |
-| `ts-engine/src/agent/codex_adapter.ts` | Phase 1: Codex process in Sandbox/Container; Phase 2: native CodingAgent adapter | Keep an `AgentAdapter` interface |
-| `ts-engine/src/workspace.ts` | Sandbox/Container workspace manager | Hooks run in isolated execution, not Worker process |
+| `ts-engine/src/agent/codex_adapter.ts` | Phase 1: Codex process in a WorkerHost; Phase 2: native CodingAgent adapter | Keep an `AgentAdapter` interface |
+| `ts-engine/src/workspace.ts` | WorkerHost-backed workspace manager | Hooks run in isolated execution, not Worker process |
 | `ts-engine/src/linear.ts` | TrackerAdapter: Linear bridge + D1-native tracker | Linear optional, not mandatory |
 | `ts-engine/src/dynamic_tool.ts` | ToolGatewayAgent / McpAgent | All tool calls audited and policy-gated |
 | `ts-engine/src/server.ts` | Worker API + Pages/Worker dashboard | Read state through Agents/D1, stream events over WebSocket |
@@ -334,7 +384,7 @@ interface CodingAgentAdapter {
 
 Compatibility adapter:
 
-- Starts `codex app-server` inside Sandbox/Container.
+- Starts `codex app-server` inside a WorkerHost adapter.
 - Uses the existing JSON-RPC semantics from `CodexAdapter`.
 - Mounts/materializes `CODEX_HOME`, profile skills, auth, config, and workspace assets.
 - Captures stdout/stderr and JSON-RPC events into R2 JSONL.
@@ -752,21 +802,22 @@ Workflow step finalizeRun
 
 Each repeat iteration must be resumable and must write enough state to avoid replaying destructive side effects without idempotency keys.
 
-### Sandbox vs Container policy
+### WorkerHost substrate policy
 
 | Execution type | Preferred target | Reason |
 |---|---|---|
+| Current dev Codex execution | VPS Docker WorkerHost on `dev@74.48.189.45` | Lowest cost, fastest debug loop, and already validated with local third-party provider config |
 | Short shell hooks, file transforms, package-less tools | Sandbox SDK | Lower operational overhead if account capability is available |
-| Repo checkout, dependency install, tests, Codex process, long-lived sessions | Containers or Sandbox with persistent session support | Stronger compatibility with current local workspace assumptions |
+| Hosted repo checkout, dependency install, tests, Codex process, long-lived sessions | Cloudflare Containers or Sandbox with persistent session support | Stronger compatibility with current local workspace assumptions when execution must be Cloudflare-managed |
 | Publishing tools needing fixed network/IP or browser/UI automation | Container with explicit network policy or external worker adapter | Avoid leaking this into the control plane |
 | Native Cloudflare tool-only agent | Agents SDK + ToolGatewayAgent | No process workspace needed unless code execution is requested |
 
-Target principle: the control-plane Worker never runs arbitrary project shell commands.
+Target principle: the control-plane Worker never runs arbitrary project shell commands; it only schedules and observes WorkerHost execution.
 
 Phase 0 execution-substrate spike:
 
-- Run `codex app-server` in a Cloudflare Container with the intended profile skill bundle and `CODEX_HOME` materialization.
-- Run the same smoke in Sandbox SDK if account access is available.
+- Run `codex app-server` in `VpsDockerWorkspace` with the intended profile skill bundle and `CODEX_HOME` materialization.
+- Run the same smoke in Cloudflare Container and Sandbox SDK if account access is available.
 - Measure startup time, dependency install behavior, stdout/stderr capture, JSON-RPC streaming, file I/O, long-running process behavior, R2 artifact export, and cleanup.
 - Pick the Phase 6/7 default before Phase 2 code starts, because D1/R2 schema, workflow step boundaries, and developer loop depend on the execution substrate.
 
@@ -980,7 +1031,7 @@ Deliverables:
 - Inventory of current profile fields, hooks, skills, and runtime env variables.
 - Compatibility matrix: current local behavior vs target Cloudflare behavior.
 - `docs/cloudflare-platform-limits.md`: product entitlement and platform limits register for Workers, Agents/Durable Objects, Workflows, D1, R2, Queues, Containers, Sandbox SDK, Access, AI Gateway, and Analytics Engine.
-- Codex-in-Cloudflare-isolation spike comparing Container and Sandbox SDK, with a recommended Phase 6/7 default.
+- Codex-in-WorkerHost spike comparing VPS Docker and Cloudflare-managed options, with a recommended Phase 6/7 default.
 - Idempotency contract accepted by architecture review.
 - v1-to-v2 profile migration policy accepted by architecture review.
 - Developer-loop decision: local, preview, or hybrid mode for Phase 2-5 development.
@@ -991,7 +1042,7 @@ Exit criteria:
 - Target architecture reviewed and accepted.
 - Linear is explicitly classified as optional adapter, not required core.
 - Codex compatibility vs native coding path decision is documented.
-- Phase 6/7 default execution substrate is selected or a documented dual-path spike result explains why selection is deferred.
+- Phase 6/7 default execution substrate is selected, including a separate current-dev default if it differs from hosted Cloudflare execution.
 - Phase 2 implementation is blocked until platform limits, idempotency, schema migration, and developer loop documents exist.
 
 ### Phase 1: Extract pure engine contracts
@@ -1096,13 +1147,13 @@ Exit criteria:
 - Failure at any workflow step can resume or retry without duplicate terminal side effects.
 - Run events are visible in dashboard and persisted to R2/D1.
 
-### Phase 6: Workspace execution on Sandbox/Containers
+### Phase 6: Workspace execution on WorkerHosts
 
-Goal: run real workspace operations under Cloudflare isolation.
+Goal: run real workspace operations under an isolated WorkerHost, starting with VPS Docker for the dev loop and keeping Cloudflare-managed execution as an adapter target.
 
 Deliverables:
 
-- WorkspaceAdapter for Sandbox SDK or Containers.
+- WorkspaceAdapter for VPS Docker first, then Cloudflare Containers/Sandbox as managed adapters.
 - Profile skill and `WORKFLOW.md` materialization.
 - Repo checkout and hook execution.
 - Workspace snapshot/archive to R2.
@@ -1114,9 +1165,9 @@ Exit criteria:
 - Shell commands never run in the control-plane Worker.
 - Hook stdout/stderr are persisted as run artifacts.
 
-### Phase 7: Codex compatibility adapter on Cloudflare
+### Phase 7: Codex compatibility adapter on WorkerHosts
 
-Goal: run the existing Codex app-server execution loop inside Cloudflare-managed isolation.
+Goal: run the existing Codex app-server execution loop inside the selected WorkerHost substrate.
 
 Deliverables:
 
@@ -1277,7 +1328,7 @@ Phase 2 cannot start until these are true:
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Sandbox/Containers capability gaps for Codex | Real coding workload may not run with full CLI parity | Keep compatibility spike early; maintain fallback adapter; define minimum runtime contract before cutover |
+| WorkerHost capability gaps for Codex | Real coding workload may not run with full CLI parity on one substrate | Keep compatibility spike early; maintain fallback adapters; define minimum runtime contract before cutover |
 | Agents/Workflows replay side effects | Duplicate comments, PRs, or state transitions | Idempotency keys for every external side effect; ToolGatewayAgent records operation IDs |
 | Linear and native issue state divergence | Wrong dispatch or missed terminal cleanup | Declare one source of truth per profile; mirror with version stamps; reconciliation reports drift |
 | Secret leakage into logs/snapshots | Security incident | Broker secrets through tools, redact logs/snapshots, approval gates for secret reads |
@@ -1293,7 +1344,7 @@ Phase 2 cannot start until these are true:
 
 ### Decision
 
-Adopt Cloudflare Agents + Workflows + Sandbox/Containers as the target architecture. Decompose Symphony into TenantAgent, ProjectAgent, IssueAgent, ExecutionWorkflow, ToolGatewayAgent, and dashboard/API Workers. Use D1/R2/Queues/Analytics Engine for durable storage and observability. Keep Linear and Codex as adapters, not core requirements.
+Adopt Cloudflare Agents + Workflows + pluggable WorkerHosts as the target architecture. Decompose Symphony into TenantAgent, ProjectAgent, IssueAgent, ExecutionWorkflow, ToolGatewayAgent, and dashboard/API Workers. Use D1/R2/Queues/Analytics Engine for durable storage and observability. Keep Linear and Codex as adapters, not core requirements.
 
 ### Drivers
 
@@ -1309,7 +1360,7 @@ Adopt Cloudflare Agents + Workflows + Sandbox/Containers as the target architect
 
 ### Why chosen
 
-The chosen architecture aligns ownership boundaries with Cloudflare primitives: Agents own durable entity state, Workflows own resumable long-running jobs, Sandbox/Containers own isolated code execution, D1/R2 own durable query/artifact storage, and Access/Analytics own operations. It also provides a safe migration path: start with compatibility adapters, then replace external dependencies progressively.
+The chosen architecture aligns ownership boundaries with Cloudflare primitives and explicit execution adapters: Agents own durable entity state, Workflows own resumable long-running jobs, WorkerHosts own isolated code execution, D1/R2 own durable query/artifact storage, and Access/Analytics own operations. It also provides a safe migration path: start with compatibility adapters, then replace external dependencies progressively.
 
 ### Consequences
 
@@ -1324,12 +1375,12 @@ Negative:
 
 - Requires a significant refactor into interfaces and distributed state machines.
 - Requires careful idempotency design around Workflows and external side effects.
-- Requires early validation of Sandbox/Container runtime compatibility.
+- Requires early validation of WorkerHost runtime compatibility.
 
 ### Follow-ups
 
 - Build Phase 1 extraction plan before coding.
-- Spike Sandbox/Container compatibility with Codex app-server before Phase 2 starts and select the Phase 6/7 default substrate.
+- Spike WorkerHost compatibility with Codex app-server before Phase 2 starts and select the Phase 6/7 default substrate.
 - Pin Cloudflare platform limits and account entitlements in a Phase 0 limits register.
 - Define Cloudflare-native tracker UX and API in detail.
 - Decide production Access policy and tenant model.
@@ -1366,7 +1417,7 @@ Required follow-up before Phase 2 implementation:
 
 - Confirm Cloudflare account access to Agents, Workflows, Sandbox SDK, Containers, D1, R2, Queues, Access, and Analytics Engine.
 - Pin current platform limits and budget assumptions in `docs/cloudflare-platform-limits.md`.
-- Run the Codex-in-Container vs Codex-in-Sandbox spike and decide the initial isolated runtime.
+- Run the Codex-in-WorkerHost spike and decide the initial isolated runtime.
 - Finalize idempotency, profile migration, and developer-loop specs.
 - Define exact D1 migration files and Wrangler bindings in the Phase 2 implementation plan.
 
