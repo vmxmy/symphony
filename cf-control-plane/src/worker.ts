@@ -14,11 +14,28 @@
 // in this commit. TenantAgent / ProjectAgent skeletons land in the next
 // commit.
 
+import { TenantAgent } from "./agents/tenant.js";
+import { ProjectAgent } from "./agents/project.js";
+
+export { TenantAgent, ProjectAgent };
+
 interface Env {
   DB: D1Database;
+  TENANT_AGENT: DurableObjectNamespace<TenantAgent>;
+  PROJECT_AGENT: DurableObjectNamespace<ProjectAgent>;
   // Bearer token for the placeholder auth gate. If unset, the Worker fails
   // closed: every authenticated route returns 503.
   OPERATOR_TOKEN?: string;
+}
+
+function tenantAgentFor(env: Env, tenantId: string) {
+  const id = env.TENANT_AGENT.idFromName(`tenant:${tenantId}`);
+  return env.TENANT_AGENT.get(id);
+}
+
+function projectAgentFor(env: Env, tenantId: string, slug: string) {
+  const id = env.PROJECT_AGENT.idFromName(`project:${tenantId}:${slug}`);
+  return env.PROJECT_AGENT.get(id);
 }
 
 type TenantRow = {
@@ -188,7 +205,10 @@ export default {
 
       if (url.pathname === "/api/v1/state") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        const [tenants, profiles] = await Promise.all([listTenants(env), listProfiles(env)]);
+        const [tenants, profiles] = await Promise.all([
+          listTenantsWithAgentState(env),
+          listProfilesWithAgentState(env),
+        ]);
         return jsonResponse({
           generated_at: new Date().toISOString(),
           tenants,
@@ -198,15 +218,84 @@ export default {
 
       if (url.pathname === "/api/v1/tenants") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        return jsonResponse({ tenants: await listTenants(env) });
+        return jsonResponse({ tenants: await listTenantsWithAgentState(env) });
       }
 
       if (url.pathname === "/api/v1/profiles") {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
-        return jsonResponse({ profiles: await listProfiles(env) });
+        return jsonResponse({ profiles: await listProfilesWithAgentState(env) });
+      }
+
+      // ---- operator transition routes -------------------------------
+      const tenantAction = url.pathname.match(
+        /^\/api\/v1\/tenants\/([^/]+)\/actions\/(pause|resume|suspend)$/,
+      );
+      if (tenantAction) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const [, tenantId, action] = tenantAction;
+        const decidedBy = req.headers.get("x-symphony-operator") ?? null;
+        const reason = req.headers.get("x-symphony-reason") ?? undefined;
+        try {
+          const stub = tenantAgentFor(env, tenantId!);
+          let result;
+          if (action === "pause") result = await stub.pause(tenantId!, decidedBy ?? undefined, reason);
+          else if (action === "resume") result = await stub.resume(tenantId!, decidedBy ?? undefined, reason);
+          else result = await stub.suspend(tenantId!, decidedBy ?? undefined, reason);
+          return jsonResponse({ tenant: result });
+        } catch (e) {
+          return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
+        }
+      }
+
+      const projectAction = url.pathname.match(
+        /^\/api\/v1\/projects\/([^/]+)\/([^/]+)\/actions\/(pause|resume|drain)$/,
+      );
+      if (projectAction) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const [, tenantId, slug, action] = projectAction;
+        const decidedBy = req.headers.get("x-symphony-operator") ?? null;
+        const reason = req.headers.get("x-symphony-reason") ?? undefined;
+        try {
+          const stub = projectAgentFor(env, tenantId!, slug!);
+          let result;
+          if (action === "pause") result = await stub.pause(tenantId!, slug!, decidedBy ?? undefined, reason);
+          else if (action === "resume") result = await stub.resume(tenantId!, slug!, decidedBy ?? undefined, reason);
+          else result = await stub.drain(tenantId!, slug!, decidedBy ?? undefined, reason);
+          return jsonResponse({ project: result });
+        } catch (e) {
+          return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
+        }
       }
     }
 
     return notFound();
   },
 };
+
+async function listTenantsWithAgentState(env: Env) {
+  const base = (await listTenants(env)) as Array<{ id: string; [k: string]: unknown }>;
+  return Promise.all(
+    base.map(async (t) => {
+      try {
+        const hot = await tenantAgentFor(env, t.id).getStatus(t.id);
+        return { ...t, agent: hot };
+      } catch (e) {
+        return { ...t, agent_error: String((e as Error).message) };
+      }
+    }),
+  );
+}
+
+async function listProfilesWithAgentState(env: Env) {
+  const base = (await listProfiles(env)) as Array<{ tenant_id: string; slug: string; [k: string]: unknown }>;
+  return Promise.all(
+    base.map(async (p) => {
+      try {
+        const hot = await projectAgentFor(env, p.tenant_id, p.slug).getStatus(p.tenant_id, p.slug);
+        return { ...p, agent: hot };
+      } catch (e) {
+        return { ...p, agent_error: String((e as Error).message) };
+      }
+    }),
+  );
+}
