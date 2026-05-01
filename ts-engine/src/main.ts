@@ -17,6 +17,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { startServer } from "./server.js";
 import { CodexAdapter } from "./agent/codex_adapter.js";
 import type { AgentFactory } from "./agent/types.js";
+import { LinearToolGateway } from "./dynamic_tool.js";
 
 type Args = {
   workflowPath: string;
@@ -99,6 +100,7 @@ async function main(): Promise<void> {
   );
   const state = new State();
   const promptBuilder = new PromptBuilder(loaded.promptTemplate);
+  const toolGateway = new LinearToolGateway(linear);
 
   // For now, every workflow uses Codex. When a second adapter (Claude SDK,
   // HTTP agent, etc.) lands, dispatch on cfg.agent.kind here.
@@ -125,6 +127,7 @@ async function main(): Promise<void> {
     log: logger,
     config: () => cfg,
     agentFactory,
+    toolGateway,
   });
 
   const server = startServer({ port, state, orchestrator, log: logger });
