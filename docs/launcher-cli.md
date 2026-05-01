@@ -9,7 +9,7 @@ Run from `<repo>/bin/symphony-launch` (or via PATH symlink). The script resolves
 its own location and derives:
 
 - `REPO_ROOT`     = `<launcher>/..`
-- `SYMPHONY_BIN`  = `$REPO_ROOT/elixir/bin/symphony`
+- `SYMPHONY_BIN`  = `$REPO_ROOT/bin/symphony`
 - `PROFILES_ROOT` = `$REPO_ROOT/profiles`
 
 Override with env vars when needed:
@@ -29,7 +29,7 @@ Show all profiles in `PROFILES_ROOT` and their RUNNING/stopped status.
 $ symphony-launch list
 Repo:     /Users/x/github/symphony
 Profiles: /Users/x/github/symphony/profiles
-Engine:   /Users/x/github/symphony/elixir/bin/symphony
+Engine:   /Users/x/github/symphony/bin/symphony
 
   NAME             STATUS   PORT    DESCRIPTION
   ----             ------   ----    -----------
@@ -63,9 +63,8 @@ Run preflight, then spawn Symphony detached:
      --logs-root profile/runtime/log \
      [--i-understand-...]   # if symphony.bypass_guardrails
    ```
-5. Wrap with `mise exec --` if `escript` not on PATH and `mise.toml` exists
-6. Write PID to `profile/runtime/symphony.pid`
-7. Poll `http://127.0.0.1:<port>/api/v1/state` up to 20s
+5. Write PID to `profile/runtime/symphony.pid`
+6. Poll `http://127.0.0.1:<port>/api/v1/state` up to 20s
 
 If Symphony does not become reachable in 20s, the start fails — check
 `profile/runtime/log/launcher.out`.

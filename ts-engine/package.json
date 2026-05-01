@@ -1,12 +1,12 @@
 {
   "name": "symphony-ts",
-  "version": "0.0.1-mvp",
-  "description": "TypeScript port of OpenAI Symphony orchestrator (per SPEC.md)",
+  "version": "1.0.0",
+  "description": "TypeScript Symphony orchestrator engine (per SPEC.md)",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "bun run src/main.ts",
-    "build": "bun build src/main.ts --compile --outfile bin/symphony-ts",
+    "build": "bun build src/main.ts --compile --outfile ../bin/symphony-ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

@@ -1,7 +1,7 @@
 // Codex adapter: implements the generic Agent interface on top of
 // `codex app-server` JSON-RPC over stdio. Owns all Codex-specific concerns
 // (approval policies, sandbox config, multi-shape token usage extraction,
-// thread/turn JSON-RPC frames). Mirrors elixir/lib/symphony_elixir/codex/app_server.ex.
+// thread/turn JSON-RPC frames).
 
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";

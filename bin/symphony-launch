@@ -2,7 +2,7 @@
 # symphony-launch: profile-based launcher for Symphony orchestrator.
 #
 # Lives in <repo>/bin/symphony-launch. Auto-detects:
-#   - SYMPHONY_BIN  : <repo>/elixir/bin/symphony  (override via env)
+#   - SYMPHONY_BIN  : <repo>/bin/symphony          (override via env)
 #   - PROFILES_ROOT : <repo>/profiles             (override via env)
 #
 # Usage: symphony-launch <command> [profile]
@@ -26,7 +26,7 @@ LAUNCHER_DIR="$(script_path)"
 REPO_ROOT="$(cd "$LAUNCHER_DIR/.." && pwd)"
 
 PROFILES_ROOT="${SYMPHONY_PROFILES_ROOT:-$REPO_ROOT/profiles}"
-SYMPHONY_BIN="${SYMPHONY_BIN:-$REPO_ROOT/elixir/bin/symphony}"
+SYMPHONY_BIN="${SYMPHONY_BIN:-$REPO_ROOT/bin/symphony}"
 
 CMD="${1:-help}"
 PROFILE="${2:-}"
@@ -78,20 +78,6 @@ is_running() {
   [ -f "$pid_f" ] && kill -0 "$(cat "$pid_f")" 2>/dev/null
 }
 
-# Detect whether we should wrap with `mise exec` (auto, no profile field needed)
-needs_mise() {
-  # Symphony binary is an escript; it requires erlang on PATH at runtime.
-  # If `escript` is on PATH, we don't need mise. Otherwise, if mise is installed
-  # and the repo's elixir/ has a mise.toml, wrap with mise.
-  if command -v escript >/dev/null 2>&1; then
-    return 1
-  fi
-  if command -v mise >/dev/null 2>&1 && [ -f "$REPO_ROOT/elixir/mise.toml" ]; then
-    return 0
-  fi
-  return 1
-}
-
 # ---- commands -------------------------------------------------------------
 
 cmd_list() {
@@ -126,6 +112,10 @@ cmd_check() {
   # 0. Symphony binary present
   [ -x "$SYMPHONY_BIN" ] || { fail "Symphony binary not found at $SYMPHONY_BIN"; return 1; }
   ok "Symphony binary: $SYMPHONY_BIN"
+  if [ "$SYMPHONY_BIN" = "$REPO_ROOT/bin/symphony" ]; then
+    command -v bun >/dev/null 2>&1 || { fail "bun not found; install Bun or set SYMPHONY_BIN to a compiled engine binary"; return 1; }
+    ok "bun runtime present"
+  fi
 
   # 1. Profile.yaml
   [ -f "$PD/profile.yaml" ] || { fail "profile.yaml missing"; return 1; }
@@ -216,17 +206,11 @@ cmd_start() {
     cmd+=(--i-understand-that-this-will-be-running-without-the-usual-guardrails)
   fi
 
-  # auto-wrap with mise if escript not on PATH
-  if needs_mise; then
-    cmd=(mise exec -- "${cmd[@]}")
-  fi
-
   info "starting Symphony for profile=$PROFILE port=$PORT"
   info "CODEX_HOME=$CODEX_HOME"
   info "engine: $SYMPHONY_BIN"
 
-  # cd into elixir/ so mise picks up mise.toml
-  cd "$REPO_ROOT/elixir"
+  cd "$REPO_ROOT"
   nohup "${cmd[@]}" > "$PD/runtime/log/launcher.out" 2>&1 &
   local pid=$!
   echo "$pid" > "$(pid_file "$PROFILE")"

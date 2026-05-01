@@ -1,12 +1,12 @@
-// Linear GraphQL client. Mirrors elixir/lib/symphony_elixir/linear/client.ex
-// query shapes so the engine fetches the same data.
+// Linear GraphQL client used by the tracker adapter.
+// Query shapes are kept stable so workflow behavior stays predictable.
 
 import type { Issue, BlockedRef, TrackerConfig } from "./types.js";
 
 const ISSUE_PAGE_SIZE = 50;
 const RELATION_FIRST = 25;
 
-// Same query as Elixir client
+// Poll query used for active/terminal issue fetches
 const POLL_QUERY = `
 query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
   issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {

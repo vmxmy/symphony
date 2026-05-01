@@ -1,70 +1,68 @@
-# symphony-ts (engine port)
+# symphony-ts
 
-TypeScript port of [OpenAI Symphony](https://github.com/openai/symphony)
-orchestrator engine, per [SPEC.md](../SPEC.md). Drop-in replacement for the
-upstream Elixir engine at `elixir/bin/symphony`.
+Active TypeScript/Bun implementation of the Symphony orchestrator engine, aligned with [SPEC.md](../SPEC.md).
 
-## Why a TypeScript port
+## CLI Contract
 
-- **No Elixir runtime dependency** — single Bun binary, easy VPS deploy
-- **Stack alignment** — most of our skills (baoyu-*, mptext, firecrawl) are
-  TypeScript; one language end-to-end
-- **Side-step the Solid 0x85 mystery** — different stdlib means different
-  byte-handling code paths, almost certainly bypassing whatever causes our
-  Chinese encoding issue
-- **Easier to extend** — add custom features (multi-profile native support,
-  fancy dashboards, structured logs) without learning OTP
-
-## CLI contract (compatible with Elixir engine)
-
-```
+```bash
 symphony-ts <WORKFLOW.md path> [--port N] [--logs-root DIR]
             [--i-understand-that-this-will-be-running-without-the-usual-guardrails]
 ```
 
-The launcher (`bin/symphony-launch`) treats `SYMPHONY_BIN` as opaque — point it
-at this binary instead of the Elixir one and the rest works unchanged.
+The repository-level wrapper exposes the same contract:
 
-## Status
+```bash
+../bin/symphony <WORKFLOW.md path> --port 4001 --logs-root ./log \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
 
-**v0 MVP** in progress. See [docs/PORTING-PLAN.md](docs/PORTING-PLAN.md) for the
-module-by-module roadmap.
+`bin/symphony-launch` treats `SYMPHONY_BIN` as opaque and defaults it to `bin/symphony`.
 
-| Module | Status |
-|---|---|
-| WorkflowLoader | partial (parses YAML+body, no Liquid yet) |
-| Linear client | TODO |
-| Orchestrator | TODO |
-| Workspace manager | TODO |
-| Codex App-Server JSON-RPC client | TODO |
-| HTTP API + dashboard | partial (Bun server, JSON API, modular server-rendered dashboard) |
-| Hot reload | TODO (post-MVP) |
-| LiveView dashboard | won't port; serve modular plain HTML+JSON |
+## Capabilities
+
+- WORKFLOW.md YAML front matter + Liquid prompt rendering
+- Linear tracker polling and raw `linear_graphql` dynamic tool
+- Per-issue workspace lifecycle and hooks
+- Codex app-server JSON-RPC adapter
+- Polling, dispatch, retry, reconciliation, and bounded concurrency
+- Bun HTTP API and lightweight server-rendered dashboard
 
 ## Run
 
 ```bash
 cd ts-engine
 bun install
-bun run src/main.ts ../profiles/content-wechat/WORKFLOW.md --port 4002
+bun run src/main.ts ../profiles/content-wechat/WORKFLOW.md --port 4001 \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
+
+## Build
+
+```bash
+bun run build
+# Produces ../bin/symphony-ts via the package script when run from ts-engine/
+```
+
+The compiled binary is a local build artifact. The tracked `../bin/symphony` wrapper runs the engine from source and is the default launcher target.
+
+## Test
+
+```bash
+bun run typecheck
+bun test
 ```
 
 ## Dashboard Architecture
 
-The TS engine dashboard stays lightweight and server-rendered. `src/server.ts`
-owns Bun route wiring and delegates the dashboard page to `src/dashboard/`:
+`src/server.ts` owns Bun route wiring and delegates dashboard rendering to `src/dashboard/`:
 
 - `view_model.ts` adapts `State.snapshot()` into display-ready dashboard data
 - `render.ts` renders HTML and owns escaping/layout composition
 - `styles.ts` keeps dashboard CSS out of route handlers
 
-Existing routes remain compatibility contracts: `/`, `/api/v1/state`,
-`/api/v1/<issue-id-or-identifier>`, and `POST /api/v1/refresh`. The first
-modular implementation is dependency-free and keeps CSS inline through a
-dedicated style module rather than adding a static asset endpoint.
+Compatibility routes:
 
-## Test workflow loader
-
-```bash
-bun run src/workflow.ts ../profiles/content-wechat/WORKFLOW.md
-```
+- `GET /`
+- `GET /api/v1/state`
+- `GET /api/v1/<issue-id-or-identifier>`
+- `POST /api/v1/refresh`

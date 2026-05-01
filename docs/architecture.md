@@ -1,106 +1,84 @@
 # Architecture: Three Entities
 
-This fork organizes itself around three clearly-separated entities. Each has a
-defined contract and is forbidden from knowing about the others' internals.
+Symphony is organized around three separated entities. Each has a defined contract and avoids knowing the others' internals.
 
-## Dependency direction
+## Dependency Direction
 
-```
-┌───────────┐         ┌───────────┐         ┌───────────┐
-│  PROFILE  │ ◀──── │ LAUNCHER  │ spawn  │ SYMPHONY  │
-│ (workflow │ loads │  (bridge) │ ─────▶ │  (engine) │
-│  bundle)  │        │           │        │           │
-└───────────┘         └───────────┘         └─────┬─────┘
-     ▲                                             │ JSON-RPC stdio
-     │ define what to do                           ▼
-     └─ Linear states + skills + env         ┌──────────┐
-                                              │  CODEX   │ ──▶ skills, $CODEX_HOME
-                                              └──────────┘
+```text
+PROFILE (workflow bundle) -> LAUNCHER (bridge) -> SYMPHONY TS ENGINE -> CODEX
 ```
 
-Single-direction: `Profile → Launcher → Symphony → Codex`.
-Profile does not know which launcher loads it. Symphony does not know about profiles.
+Profiles define what to do. The launcher validates and starts profile-specific engine processes. The TypeScript engine runs tracker polling, workspace lifecycle, Codex JSON-RPC sessions, retry/reconciliation, logging, and the dashboard API.
 
----
+## 1. Symphony TS Engine
 
-## 1. Symphony · the engine
+Long-running orchestration daemon.
 
-Long-running orchestration daemon. Polls a tracker (Linear), runs a state
-machine, dispatches Codex agents, owns the JSON-RPC protocol with Codex.
+**Input**: one `<WORKFLOW.md>` path plus CLI args.
 
-**Input**: one `<WORKFLOW.md>` path + CLI args.
-**Output**: HTTP/dashboard observability + per-issue artifacts.
+**Output**: HTTP/dashboard observability, logs, and per-issue workspaces/artifacts.
 
-**Lives in**: `elixir/` (upstream untouched at `elixir/lib/`).
+**Lives in**: `ts-engine/`.
 
-**It does not know**: profile concept, credentials, where skills live.
+**Entry points**:
 
-## 2. Profile · the workflow bundle
+- `bin/symphony` — source wrapper, default launcher target
+- `ts-engine/src/main.ts` — Bun runtime entry
+- `ts-engine/package.json` — `typecheck`, `test`, and `build` scripts
 
-A self-contained pipeline. Defines what work this Symphony instance does:
-state machine, prompt body, Linear project, credentials, skills, Codex env.
+**It does not know**: profile registry details, where the launcher found the profile, or how credentials are provisioned beyond process env and `WORKFLOW.md`.
+
+## 2. Profile · the Workflow Bundle
+
+A self-contained pipeline. It defines state machine, prompt body, tracker project, credentials, skills, and Codex environment.
 
 **Lives in**: `profiles/<name>/`.
 
 **Required files**:
-- `profile.yaml` — metadata + Linear/Symphony/preflight config
-- `WORKFLOW.md` — Symphony pipeline definition (frontmatter + prompt body)
+
+- `profile.yaml` — metadata + tracker/Symphony/preflight config
+- `WORKFLOW.md` — engine config front matter + prompt body
 - `env` (gitignored) / `env.example` (committed) — credentials
 - `skills/` — profile-specific Codex skills
-- `codex-home/` — CODEX_HOME isolation (config.toml + auth.json + skills symlinks)
-- `runtime/` (gitignored) — PID + log + sessions
+- `codex-home/` — CODEX_HOME isolation
+- `runtime/` (gitignored) — PID, logs, sessions
 
-**It does not know**: launcher implementation, Symphony binary path,
-existence of other profiles.
+**It does not know**: launcher implementation or engine binary path.
 
-## 3. Launcher · the bridge
+## 3. Launcher · the Bridge
 
-Tightly coupled to Symphony's CLI. Reads `profile.yaml`, runs preflight,
-sets `CODEX_HOME`, sources `env`, spawns the engine, manages PID lifecycle.
+Profile-aware process manager.
 
 **Lives in**: `bin/symphony-launch`.
 
 **Auto-detects**:
-- `SYMPHONY_BIN` from `$(dirname "$0")/../elixir/bin/symphony`
+
+- `SYMPHONY_BIN` from `$(dirname "$0")/symphony`
 - `PROFILES_ROOT` from `$(dirname "$0")/../profiles`
 
 Both can be overridden via env vars.
 
-**It does not know**: WORKFLOW.md prompt content, agent behavior, domain logic.
+**It does**:
 
----
+- validates profile files, env vars, skills, and `codex-home`
+- exports profile-specific `CODEX_HOME`
+- starts/stops/checks engine processes
+- writes PID and launcher logs under the profile runtime directory
 
-## Boundaries (what each must NOT do)
+**It does not know**: `WORKFLOW.md` prompt semantics or agent behavior.
+
+## Boundaries
 
 | Entity | Forbidden |
 |---|---|
-| **Symphony** | Knowing about profiles, multi-tenancy, credentials |
-| **Profile** | Hardcoding Symphony binary path, assuming a specific launcher |
-| **Launcher** | Interpreting WORKFLOW.md prompt, modifying agent behavior |
+| Symphony engine | Hardcoding profile names or profile-specific credentials |
+| Profile | Hardcoding an engine binary path |
+| Launcher | Interpreting prompt body or changing agent behavior |
 
----
+## Invariants
 
-## Key product invariants
-
-1. **Profile is portable**: `tar` + ship to another machine; `git clone` + `cp env.example env` + run.
-2. **Launcher is profile-agnostic**: adding a new profile requires no launcher code change.
-3. **Symphony is launcher-agnostic**: replacing bash launcher with Go/Rust requires no engine change.
-4. **CODEX_HOME isolates**: different profiles have separate skills / sessions / image cache.
-5. **Credentials stay in profile**: Symphony and launcher never persist secrets.
-
----
-
-## Why all three live in one repo
-
-The fork's product identity is the union of (engine + launcher + profiles).
-Splitting them across repos would mean:
-- launcher version drifts from Symphony CLI changes
-- profile templates separated from the launcher that loads them
-- collaborators receiving fragments instead of a complete product
-- no atomic git tag describing "the whole platform at version X"
-
-By co-locating in one fork repo, `git clone` gives you a working multi-profile
-platform with one cohesive history.
-
-The upstream relationship is preserved via `git remote add upstream` —
-see [upstream-sync.md](upstream-sync.md).
+1. Profiles are portable: copy a profile directory, fill `env`, and run it.
+2. Launcher is profile-agnostic: adding a profile requires no launcher code change.
+3. Engine is launcher-agnostic: any process manager can run `bin/symphony` or a compiled binary.
+4. `CODEX_HOME` isolates profile sessions, skills, and generated assets.
+5. Credentials stay in profile env files or external secret managers; they are not committed.

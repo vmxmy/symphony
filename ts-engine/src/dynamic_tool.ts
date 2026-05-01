@@ -1,5 +1,5 @@
 // Dynamic tools that Symphony injects into Codex turns.
-// Mirrors elixir/lib/symphony_elixir/codex/dynamic_tool.ex.
+// Dynamic tool surface for Codex app-server turns.
 
 import type { LinearClient } from "./linear.js";
 import type { ToolDefinition, ToolResult, ToolCall } from "./agent/types.js";

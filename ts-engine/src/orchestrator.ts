@@ -1,5 +1,5 @@
 // Orchestrator: poll loop + dispatch + retry queue + reconciliation.
-// Mirrors elixir/lib/symphony_elixir/orchestrator.ex behaviour at a high level.
+// Implements the SPEC poll loop, dispatch, retry queue, and reconciliation behavior.
 
 import type { WorkflowConfig, Issue } from "./types.js";
 import type { Logger } from "./log.js";

@@ -17,7 +17,7 @@ mv WORKFLOW.md.template WORKFLOW.md
 $EDITOR profile.yaml          # name, port (must be unique), workspace_root, linear.*
 
 # 4. Edit pipeline definition
-$EDITOR WORKFLOW.md           # state machine + prompt body (ASCII only!)
+$EDITOR WORKFLOW.md           # state machine + prompt body
 
 # 5. Wire credentials
 cp env.example env

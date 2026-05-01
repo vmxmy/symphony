@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Thin source-tree wrapper for the TypeScript Symphony engine.
+set -euo pipefail
+
+script_path() {
+  local src="${BASH_SOURCE[0]}"
+  while [ -h "$src" ]; do
+    local d
+    d=$(cd -P "$(dirname "$src")" && pwd)
+    src=$(readlink "$src")
+    [[ "$src" != /* ]] && src="$d/$src"
+  done
+  cd -P "$(dirname "$src")" && pwd
+}
+
+BIN_DIR="$(script_path)"
+REPO_ROOT="$(cd "$BIN_DIR/.." && pwd)"
+
+if ! command -v bun >/dev/null 2>&1; then
+  echo "ERROR: bun is required to run Symphony from source. Install Bun or set SYMPHONY_BIN to a compiled engine binary." >&2
+  exit 1
+fi
+
+exec bun "$REPO_ROOT/ts-engine/src/main.ts" "$@"

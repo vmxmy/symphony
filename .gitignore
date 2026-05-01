@@ -46,15 +46,6 @@ profiles/*/codex-home/archived_sessions/
 profiles/*/codex-home/internal_storage.json
 profiles/*/codex-home/plugins/
 
-# Symphony engine local artifacts (kept out of fork)
-elixir/_build/
-elixir/deps/
-elixir/log/
-elixir/.elixir_ls/
-elixir/.fetch
-elixir/erl_crash.dump
-elixir/cover/
-
 # Local backup / scratch
 *.bak
 *.bak.*
@@ -72,5 +63,3 @@ WORKFLOW.md.notes
 # Local-only oh-my-* state
 .omc/
 .omx/
-elixir/.omc/
-elixir/.omx/
