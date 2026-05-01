@@ -584,13 +584,15 @@ Do not let lanes modify the same files without coordination. Final verifier runs
 Phase 1 can be implemented independently, but Phase 2 must not start just because Phase 1 passes. The target-document review added these blockers before any Phase 2 Cloudflare control-plane code:
 
 1. Pin Cloudflare account entitlements and platform limits in `docs/cloudflare-platform-limits.md`.
-2. Run a Codex-in-Cloudflare-isolation spike comparing Containers and Sandbox SDK, then choose the Phase 6/7 default substrate or document a dual-path risk.
+2. Run a Codex-in-WorkerHost spike comparing VPS Docker and Cloudflare-managed substrates, then choose the Phase 6/7 default substrate or document a dual-path risk.
 3. Finalize the ToolGateway idempotency contract, including key format, D1 persistence, and replay behavior.
 4. Finalize v1-to-v2 profile import/migration policy and dry-run validator behavior.
 5. Pick the developer loop for profile import, preview refresh, debugging, and reset.
 6. Define a reconciliation diff harness for Phase 3 parity with the current `Orchestrator.tick` behavior.
 
 These gates are intentionally out of scope for Phase 1 implementation, but the Phase 1 contracts should not make any of them harder.
+
+The Phase 1 `WorkspaceAdapter` contract (`ts-engine/src/contracts/workspace.ts`) is the stable boundary above the future Phase 6 `WorkerHost` substrate. Phase 6 introduces `WorkerHost` underneath as a separate layer (see `docs/cloudflare-agent-native-target.md` §6 "Layering: WorkspaceAdapter and WorkerHost") without breaking Phase 1 callers. Phase 2 work must not collapse the two layers into one interface.
 
 ## 15. Stop Conditions
 
