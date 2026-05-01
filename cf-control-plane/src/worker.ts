@@ -16,6 +16,12 @@
 
 import { TenantAgent } from "./agents/tenant.js";
 import { ProjectAgent } from "./agents/project.js";
+import { renderDashboard } from "./dashboard/render.js";
+import {
+  getSession,
+  sessionCookieHeader,
+  sessionClearCookieHeader,
+} from "./dashboard/auth.js";
 
 export { TenantAgent, ProjectAgent };
 
@@ -196,6 +202,51 @@ export default {
         { status: db.ok ? "ok" : "degraded", db: db.ok ? "ok" : "down", message: db.message ?? null },
         { status },
       );
+    }
+
+    if (url.pathname === "/dashboard") {
+      if (req.method !== "GET") return methodNotAllowed(["GET"]);
+      if (!env.OPERATOR_TOKEN) return forbidden("OPERATOR_TOKEN is not configured on this Worker");
+      const session = getSession(req, env.OPERATOR_TOKEN);
+      if (!session) {
+        return new Response(
+          "401 unauthorized — supply Authorization: Bearer <token> or visit /dashboard?token=<token> once.",
+          { status: 401, headers: { "content-type": "text/plain; charset=utf-8" } },
+        );
+      }
+      // First-touch query path: upgrade to cookie + clean URL.
+      if (session.source === "query") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: "/dashboard",
+            "set-cookie": sessionCookieHeader(session.token),
+          },
+        });
+      }
+      const [tenants, profiles] = await Promise.all([
+        listTenantsWithAgentState(env),
+        listProfilesWithAgentState(env),
+      ]);
+      const html = renderDashboard({
+        generated_at: new Date().toISOString(),
+        tenants: tenants as Parameters<typeof renderDashboard>[0]["tenants"],
+        profiles: profiles as Parameters<typeof renderDashboard>[0]["profiles"],
+      });
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
+    if (url.pathname === "/logout") {
+      return new Response(null, {
+        status: 302,
+        headers: {
+          location: "/",
+          "set-cookie": sessionClearCookieHeader(),
+        },
+      });
     }
 
     // ---- gated routes ----
