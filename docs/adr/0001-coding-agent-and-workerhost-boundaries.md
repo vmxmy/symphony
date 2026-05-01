@@ -20,7 +20,8 @@ By the end of Phase 1 the engine has two stable seams:
   `local_docker`.
 
 The Phase 0 spike (`spikes/codex-on-cloudflare/`) showed Codex compatibility
-running cleanly on `vps_docker` and partially on `cloudflare_container`. It
+running cleanly on `vps_docker` and single-turn model execution passing on
+`cloudflare_container` after a clean Container application reset. It
 also surfaced a recurring temptation: every time the Codex execution path
 hits a runtime quirk, a voice in the room argues for "Phase 10 native
 CodingAgent now" — i.e. swap the Codex brain for a Worker+DO orchestration
@@ -65,8 +66,9 @@ becomes a candidate work item only when at least one of these is true:
 | 5 | Provider lock-in cost | Need to support a model provider whose contract Codex CLI does not expose, AND the workaround through Codex config becomes a maintenance burden |
 
 **None of these are true today.** The Phase 0 spike's CF Container TLS issue
-is a single-substrate runtime quirk on one of four `WorkerHost` backends; it
-does not satisfy trigger #1.
+was resolved at the WorkerHost layer by a clean Container application reset
+plus explicit `SSL_CERT_FILE` / `SSL_CERT_DIR` env vars; it does not satisfy
+trigger #1.
 
 ## 4. Trigger evaluation cadence
 
@@ -109,7 +111,7 @@ Negative:
 - Operators may find the policy frustrating during a sustained Codex
   outage. Mitigation: substrate isolation via `WorkerHost` keeps the blast
   radius small (e.g. switch the dev profile from `cloudflare_container`
-  back to `vps_docker` while the CF Container TLS finding is investigated).
+  back to `vps_docker` while a substrate finding is investigated).
 
 ## 7. Trigger events
 
@@ -123,8 +125,8 @@ Negative:
 - `docs/cloudflare-agent-native-phase1-plan.md` §14 (Phase 2 readiness
   gates).
 - `docs/cloudflare-platform-limits.md` §3 (WorkerHost runtime findings).
-- `spikes/codex-on-cloudflare/REPORT.md` §13 (persistent bridge spike;
-  CF TLS open finding).
+- `spikes/codex-on-cloudflare/REPORT.md` §13-§15 (persistent bridge spike;
+  CF TLS reset/fix finding).
 - `ts-engine/src/contracts/{agent,workspace,tracker,tools,events}.ts`
   (Phase 1 contracts).
 - `omc ask codex` artifact, 2026-05-01T15:08:02Z (decision rationale and

@@ -32,7 +32,7 @@ Scope: Cloudflare Agent-native control plane for Symphony, with pluggable Worker
 | Substrate | Status | Evidence | Decision |
 |---|---|---|---|
 | `VpsDockerWorkspace` | Pass | Container on `dev@74.48.189.45` returned `/healthz 200`, completed a READY Codex turn in 7.0s bridge time, emitted `item/agentMessage/delta` and `thread/tokenUsage/updated`, and wrote `vps-smoke.txt` with content `READY` | Current dev default |
-| `CloudflareContainerWorkspace` | Partial pass | Worker -> Container -> Codex JSON-RPC path reached turn execution. Initial run failed because the image lacked native CA certs and used default OpenAI endpoint; image now installs `ca-certificates`/`bubblewrap` and supports local provider config | Hosted Cloudflare default after one clean redeploy/smoke |
+| `CloudflareContainerWorkspace` | Pass for single-turn model execution | After deleting and recreating the CF Container application, `/reset` returned 200 and Codex completed real model turns with `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`, `SSL_CERT_DIR=/etc/ssl/certs`, and the same local third-party provider config | Hosted Cloudflare default for managed execution; still run multi-turn/file I/O parity before full cutover |
 | `CloudflareSandboxWorkspace` | Not run | Requires Sandbox account access and parity testing with persistent sessions, file I/O, and Codex turn loops | Opt-in only |
 | `LocalDockerWorkspace` | Not run in this spike | Same image should support local debug; not the production target | Compatibility/debug adapter |
 
@@ -42,7 +42,7 @@ Phase 2 may start only after these are true:
 
 1. Control-plane D1 migrations include hot indexes, retention/archive fields, tenant policy records, and idempotency records.
 2. WorkerHost selection is explicit in profile/runtime config: current dev default `vps_docker`, hosted Cloudflare default `cloudflare_container`.
-3. Cloudflare Container path has one clean smoke using the same local third-party provider config, or Phase 6/7 explicitly remains VPS-only until hosted parity is proven.
+3. Cloudflare Container path has one clean smoke using the same local third-party provider config. Done for single-turn model execution on 2026-05-01; multi-turn/file I/O parity remains a Phase 6/7 hardening task.
 4. Reconciliation diff harness exists for current TS behavior vs ProjectAgent behavior.
 5. Developer loop can import/reset a profile without manual D1/R2 edits.
 
