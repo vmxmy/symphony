@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { Database } from "bun:sqlite";
 
 function tableColumns(db: Database, table: string): string[] {
@@ -8,11 +8,14 @@ function tableColumns(db: Database, table: string): string[] {
 
 describe("D1 initial schema contract", () => {
   test("migration creates drift-resistant tables and review-critical columns/indexes", () => {
-    const migrationSql = readFileSync("migrations/0001_init.sql", "utf8");
-    expect(migrationSql).not.toMatch(/CREATE TABLE IF NOT EXISTS/i);
+    const migrations = readdirSync("migrations")
+      .filter((file) => file.endsWith(".sql"))
+      .sort()
+      .map((file) => readFileSync(`migrations/${file}`, "utf8"));
+    expect(migrations[0]).not.toMatch(/CREATE TABLE IF NOT EXISTS/i);
 
     const db = new Database(":memory:");
-    db.exec(migrationSql);
+    for (const migrationSql of migrations) db.exec(migrationSql);
 
     expect(tableColumns(db, "run_events")).toContain("archived_at");
     expect(tableColumns(db, "tool_calls")).toContain("archived_at");

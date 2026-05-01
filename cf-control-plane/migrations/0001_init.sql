@@ -145,12 +145,11 @@ CREATE TABLE run_steps (
   finished_at     TEXT,
   input_ref       TEXT,                 -- R2 path
   output_ref      TEXT,                 -- R2 path
-  error           TEXT,
-  archived_at     TEXT
+  error           TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_steps_run_seq
-  ON run_steps(run_id, step_sequence) WHERE archived_at IS NULL;
+  ON run_steps(run_id, step_sequence);
 
 -- ---------------------------------------------------------------------------
 -- run_events: queryable event index. Severity-keyed for fast dashboard look-up.
@@ -164,16 +163,15 @@ CREATE TABLE run_events (
   severity        TEXT NOT NULL,        -- debug|info|warning|error
   message         TEXT,
   payload_ref     TEXT,                 -- R2 path for large payloads
-  created_at      TEXT NOT NULL,
-  archived_at     TEXT
+  created_at      TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_run_events_run_time
-  ON run_events(run_id, created_at) WHERE archived_at IS NULL;
+  ON run_events(run_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_run_events_issue_time
-  ON run_events(issue_id, created_at) WHERE archived_at IS NULL;
+  ON run_events(issue_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_run_events_severity_time
-  ON run_events(severity, created_at) WHERE archived_at IS NULL;
+  ON run_events(severity, created_at);
 
 -- ---------------------------------------------------------------------------
 -- tool_calls: audit log of every dynamic tool invocation through ToolGateway.
@@ -190,16 +188,15 @@ CREATE TABLE tool_calls (
   output_ref      TEXT,                 -- R2 path
   approval_id     TEXT,
   started_at      TEXT NOT NULL,
-  finished_at     TEXT,
-  archived_at     TEXT
+  finished_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tool_calls_run
-  ON tool_calls(run_id) WHERE archived_at IS NULL;
+  ON tool_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_name_time
-  ON tool_calls(tool_name, started_at) WHERE archived_at IS NULL;
+  ON tool_calls(tool_name, started_at);
 CREATE INDEX IF NOT EXISTS idx_tool_calls_status
-  ON tool_calls(status, started_at) WHERE archived_at IS NULL;
+  ON tool_calls(status, started_at);
 
 -- ---------------------------------------------------------------------------
 -- approvals: human-in-the-loop gate records. Bodies in R2; this table is the
@@ -246,12 +243,7 @@ CREATE TABLE idempotency_records (
   run_id          TEXT,
   tool_call_id    TEXT,                 -- originating tool_calls.id (so audit can join)
   operation_type  TEXT NOT NULL,        -- e.g. 'tracker.transition', 'github.pull_request'
-  status          TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed', 'expired')),
-  lease_owner     TEXT,
-  lease_expires_at TEXT,
-  attempt_count   INTEGER NOT NULL DEFAULT 0,
-  retry_after     TEXT,
-  failure_class   TEXT,
+  status          TEXT NOT NULL CHECK (status IN ('in_progress', 'completed', 'failed')),
   external_ref    TEXT,                 -- provider-side ID once known
   result_ref      TEXT,                 -- R2 path to stored result envelope
   created_at      TEXT NOT NULL,
@@ -264,8 +256,6 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_tool_call
   ON idempotency_records(tool_call_id);
 CREATE INDEX IF NOT EXISTS idx_idempotency_status_created
   ON idempotency_records(status, created_at);
-CREATE INDEX IF NOT EXISTS idx_idempotency_lease_expires
-  ON idempotency_records(lease_expires_at) WHERE status = 'in_progress';
 
 -- ---------------------------------------------------------------------------
 -- Sanity: a SELECT that returns the table count helps wrangler exit cleanly
