@@ -13,6 +13,9 @@ bin/symphony-ts
 ts-engine/.*-bun-build
 ts-engine/.*.bun-build*
 
+# Node deps (Bun installs here too)
+ts-engine/node_modules/
+
 # Local agent / IDE config that shouldn't enter the fork
 AGENTS.md
 .claude/

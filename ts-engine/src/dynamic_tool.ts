@@ -2,7 +2,7 @@
 // Mirrors elixir/lib/symphony_elixir/codex/dynamic_tool.ex.
 
 import type { LinearClient } from "./linear.js";
-import type { ToolDefinition, ToolResult, ToolCall } from "./codex.js";
+import type { ToolDefinition, ToolResult, ToolCall } from "./agent/types.js";
 
 export const LINEAR_GRAPHQL_TOOL_NAME = "linear_graphql";
 
