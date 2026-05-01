@@ -66,3 +66,17 @@ Compatibility routes:
 - `GET /api/v1/state`
 - `GET /api/v1/<issue-id-or-identifier>`
 - `POST /api/v1/refresh`
+
+## Adapter Boundaries
+
+Phase 1 of the Cloudflare Agent native migration (see `../docs/cloudflare-agent-native-phase1-plan.md`) extracted five adapter contracts so orchestration logic depends on interfaces rather than concrete classes. The composition root in `src/main.ts` is the only normal-path file that wires concrete local implementations together.
+
+| Contract | File | Local implementation | Future Cloudflare implementation |
+|---|---|---|---|
+| `TrackerAdapter` | `src/contracts/tracker.ts` | `LinearClient` in `src/linear.ts` | `TrackerAdapter` for `tracker.kind: cloudflare` (Phase 9) |
+| `WorkspaceAdapter` | `src/contracts/workspace.ts` | `WorkspaceManager` in `src/workspace.ts` | Sandbox/Container workspace adapter (Phase 6) |
+| `ToolGateway` | `src/contracts/tools.ts` | `LinearToolGateway` in `src/dynamic_tool.ts` | `ToolGatewayAgent` / `McpAgent` with policy + audit (Phase 8) |
+| `EventSink` | `src/contracts/events.ts` | `Logger` in `src/log.ts` | D1/R2/Analytics Engine sinks (Phase 2-5) |
+| `CodingAgentAdapter` | `src/contracts/agent.ts` (alias of `Agent`) | `CodexAdapter` in `src/agent/codex_adapter.ts` | Native Cloudflare coding-agent adapter (Phase 10) |
+
+Phase 1 makes the seams; the engine still runs locally with Linear and Codex exactly as before. There is no Cloudflare deployment yet — see `docs/cloudflare-agent-native-target.md` §16 for the migration phases and `docs/cloudflare-agent-native-phase1-plan.md` §14 for the Phase 2 readiness gates that must pass before any Cloudflare-runtime code lands.
