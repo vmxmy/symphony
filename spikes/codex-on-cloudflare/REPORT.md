@@ -320,3 +320,171 @@ WorkerHost / WorkspaceAdapter
 ```
 
 Cloudflare Containers remain viable as a managed execution substrate, but they are no longer required for the current dev environment or for cost-sensitive deployments.
+
+## 13. Persistent bridge spike (spike v1)
+
+Run date: 2026-05-01
+Bridge change: spawn-once + persistent thread + serialized turn lock + `/reset` endpoint (commit `2576f72`).
+Multi-turn smoke: `scripts/smoke-multi.ts` (commit `bbef3c0`).
+
+### 13.1 Goals
+
+Replace the spawn-per-request bridge so the WorkerHost mirrors the production
+shape (one IssueAgent → one long-lived codex session per issue, many turns
+share a thread). Validate:
+
+- `initialize` + `thread/start` happen exactly once across many `/run-turn`
+  calls.
+- `threadId` persists across turns (the only way to share conversation context
+  in codex).
+- `/reset` kills codex and starts a fresh thread on the next call.
+- Cold-start cost is paid once per container life, not per turn.
+
+### 13.2 VPS Docker WorkerHost result (new bridge)
+
+Single-turn smoke (`scripts/smoke.ts`):
+
+- `total_ms=6810`, `bridge_ms=6133`
+- Inner turn `completed`, threadId `019de40d-b113-7c80-b04d-c056bac227c4`
+- Frames included `item/agentMessage/delta` and `thread/tokenUsage/updated`
+- Empty `stderr_tail`
+
+Multi-turn smoke (`scripts/smoke-multi.ts`, 3 turns + `/reset` + 1 turn):
+
+```json
+{
+  "thread_persistence": "ok",
+  "reset_creates_new_thread": "ok",
+  "cold_vs_warm_ms": {
+    "cold_init": 3858,
+    "warm_avg": 5134,
+    "post_reset": 8140
+  },
+  "turns": [
+    { "label": "turn-1", "bridge_ms": 3858, "inner_status": "completed",
+      "thread_id": "019de40d-b113-7c80-b04d-c056bac227c4" },
+    { "label": "turn-2", "bridge_ms": 2894, "inner_status": "completed",
+      "thread_id": "019de40d-b113-7c80-b04d-c056bac227c4" },
+    { "label": "turn-3", "bridge_ms": 7373, "inner_status": "completed",
+      "thread_id": "019de40d-b113-7c80-b04d-c056bac227c4" },
+    { "label": "turn-4", "bridge_ms": 8140, "inner_status": "completed",
+      "thread_id": "019de40e-266d-7b52-81a0-f487bfcaa27b" }
+  ]
+}
+```
+
+Outcome: full pass. All four inner turns `completed`, turns 1–3 share the same
+`threadId` (proves spawn-once + persistent thread), turn 4 has a different
+`threadId` (proves `/reset` creates a fresh thread). Warm reuse averages
+~5s vs. ~8s post-reset cold start. The previous spawn-per-request bridge
+paid ~7s cold start every turn.
+
+### 13.3 Cloudflare Container WorkerHost result (new bridge)
+
+Infrastructure:
+
+- `/healthz` 200 ✅
+- `/reset` 200 with body `{"reset": true}` ✅ (proves new bridge image is
+  live in the running Container instance)
+
+Model call: **fail**. Multi-turn smoke shows all four inner turns `failed`
+with the same error class as the original `§1` partial pass:
+
+```text
+"stream disconnected before completion: error sending request for url
+ (https://api.openai.com/v1/responses)"
+```
+
+Stderr shows the original codex CA-cert error class:
+
+```text
+codex_api::endpoint::responses_websocket: failed to connect to websocket:
+  IO error: no native root CA certificates found (errors: []),
+  url: wss://api.openai.com/v1/responses
+```
+
+Each turn produces a different `threadId`, because codex exits after the
+model call fails, the bridge `clearCodexState` drops the cached thread, and
+the next `/run-turn` lazy-inits a fresh codex.
+
+This **is not** a bridge-shape regression: the bridge is observably
+correct on VPS with the same image. It is a Cloudflare Container TLS
+resolution finding.
+
+### 13.4 Deploy mechanics: how to actually update CF
+
+Repeating the same `wrangler deploy` after a bridge file change is **not**
+sufficient. Wrangler container deploy will:
+
+1. Build the local Docker image with a content-addressed tag.
+2. Compute a manifest hash and check whether the registry already has it.
+3. If yes, **skip the push** and **leave the Worker config pointing at the
+   old image tag**, even though the Worker version ID is still bumped.
+4. If a new container instance is started after `sleepAfter` expires, it
+   pulls the (still old) image.
+
+Two structural changes finally pushed the new bridge to a fresh Container:
+
+- `Dockerfile`: added `ENV BRIDGE_REVISION=v1-persistent-2026-05-01` so the
+  manifest hash is forced to differ (cache-bust). Without this, deploys 1–3
+  this session reused the prior image hash.
+- `src/worker.ts`: bumped `CONTAINER_INSTANCE_NAME` from
+  `local-provider-config-v1` to `persistent-bridge-v1`. Even after the new
+  image was uploaded (deploy 4), the existing warm Container kept serving
+  the old code until `sleepAfter` (5m) expired. Bumping the DO instance
+  name created a fresh DO + Container immediately and `/reset` started
+  returning 200.
+
+Operator rule for future bridge-shape changes on Cloudflare Containers:
+bump `BRIDGE_REVISION` and `CONTAINER_INSTANCE_NAME` together, or accept a
+5-minute warm-instance delay before the new code is reachable.
+
+### 13.5 Open: CF Container TLS resolution
+
+The same Docker image works on VPS but fails on Cloudflare Container.
+
+Confirmed by inspecting the deployed image
+`registry.cloudflare.com/.../symphony-codex-spike-codexcontainer:37c09245`
+on the local Docker host:
+
+- `/etc/ssl/certs/ca-certificates.crt` is present (216 KB).
+- `/usr/bin/bwrap` (bubblewrap) is present.
+- Base is Debian GNU/Linux 12.
+
+Therefore the CF runtime is somehow not exposing the same trust store to
+codex. Hypotheses to test next:
+
+1. **`SSL_CERT_FILE` env var.** Try `ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`
+   and `SSL_CERT_DIR=/etc/ssl/certs` in the Dockerfile, then redeploy.
+2. **codex Rust HTTP stack.** codex 0.128.0 may use rustls with a vendored
+   trust store that ignores OS CA paths in some configurations. Verify by
+   running codex inside the deployed image locally with `docker run` and
+   the same env vars CF would set; if it works locally but fails on CF,
+   the difference is in CF's runtime, not the image.
+3. **CF Container egress.** Check whether CF Containers go through an HTTPS
+   inspection middlebox or a proxy that requires a Cloudflare-issued
+   intermediate cert in the trust store.
+4. **Use AI Gateway instead of api.openai.com directly.** Routes outbound
+   model traffic through `https://gateway.ai.cloudflare.com/...` which is
+   already trusted by CF runtime; this also wins us caching/limits/audit
+   for Phase 2+ control plane.
+
+Until this is resolved, **CF Container is not a usable model-execution
+substrate** for Codex-as-runtime. VPS Docker remains the dev default and
+the only proven model-execution path. CF Container is validated only at the
+infrastructure layer (image build, deploy, secret materialization, /healthz,
+/reset, JSON-RPC stream up to model call).
+
+### 13.6 Updated execution-substrate recommendation
+
+| WorkerHost | Bridge | /healthz | /reset | Single turn | Multi-turn | Status |
+|---|---|---|---|---|---|---|
+| VPS Docker | persistent | ✅ | ✅ | ✅ inner completed | ✅ thread persists, reset OK | **Production-grade for spike** |
+| Cloudflare Container | persistent | ✅ | ✅ | ❌ TLS / CA error | ❌ codex re-inits each turn | **Infra OK; model path blocked on §13.5** |
+| Cloudflare Sandbox | n/a | not run | not run | not run | not run | Opt-in only |
+| Local Docker | n/a | n/a | n/a | n/a | n/a | Debug only |
+
+Decision: keep `VpsDockerWorkspace` as the dev default and as the Phase 7
+Codex compatibility substrate. `CloudflareContainerWorkspace` waits on the
+§13.5 CA/TLS resolution before it can be promoted from "infra-only" to
+"production-capable" on the WorkerHost matrix.
