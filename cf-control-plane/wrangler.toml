@@ -25,6 +25,24 @@ database_id = "da72ce20-3e3d-4cf6-bc66-4d9aa71862f1"
 migrations_dir = "migrations"
 
 # ---------------------------------------------------------------------------
+# Durable Objects: TenantAgent + ProjectAgent host the durable per-entity
+# state machines. Identity is set via env.TENANT_AGENT.idFromName(...) and
+# env.PROJECT_AGENT.idFromName(...). DO storage is the source of truth; D1
+# is the queryable mirror.
+# ---------------------------------------------------------------------------
+[[durable_objects.bindings]]
+name = "TENANT_AGENT"
+class_name = "TenantAgent"
+
+[[durable_objects.bindings]]
+name = "PROJECT_AGENT"
+class_name = "ProjectAgent"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TenantAgent", "ProjectAgent"]
+
+# ---------------------------------------------------------------------------
 # R2: artifact bucket for run bundles, transcripts, snapshots, tool payloads.
 # Provisioned in a follow-up; placeholder kept here so the binding shape is
 # documented next to the D1 binding.

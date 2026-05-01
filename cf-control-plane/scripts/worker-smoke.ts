@@ -94,6 +94,80 @@ if (stateRes.ok) {
   }
 }
 
+// ---- agent transition probes ---------------------------------------------
+//
+// Verify hot state agent merges and operator transition routes work
+// end-to-end. Always restore to active state at the end so re-running is
+// safe.
+
+async function postAction(path: string) {
+  return fetch(`${WORKER_URL}${path}`, {
+    method: "POST",
+    headers: { ...auth, "x-symphony-operator": "smoke", "x-symphony-reason": "smoke-test" },
+  });
+}
+
+async function getStateJson() {
+  const r = await fetch(`${WORKER_URL}/api/v1/state`, { headers: auth });
+  return JSON.parse(await r.text()) as {
+    tenants: Array<{ id: string; status: string; agent?: { status: string } }>;
+    profiles: Array<{ tenant_id: string; slug: string; status: string; agent?: { status: string } }>;
+  };
+}
+
+const tenantId = "personal";
+const profileSlug = "content-wechat";
+
+console.error("\n[transition probes]");
+
+// 1. Tenant: pause -> verify both D1 status and agent hot state -> resume
+await probe("POST tenant pause", 200, () =>
+  postAction(`/api/v1/tenants/${tenantId}/actions/pause`),
+);
+{
+  const s = await getStateJson();
+  const t = s.tenants.find((x) => x.id === tenantId);
+  const ok = t?.status === "paused" && t?.agent?.status === "paused";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant.status mirrored to D1+agent: D1=${t?.status} agent=${t?.agent?.status}`);
+  if (!ok) failures++;
+}
+await probe("POST tenant resume", 200, () =>
+  postAction(`/api/v1/tenants/${tenantId}/actions/resume`),
+);
+{
+  const s = await getStateJson();
+  const t = s.tenants.find((x) => x.id === tenantId);
+  const ok = t?.status === "active" && t?.agent?.status === "active";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant returned to active: D1=${t?.status} agent=${t?.agent?.status}`);
+  if (!ok) failures++;
+}
+
+// 2. Project: drain -> resume
+await probe("POST project drain", 200, () =>
+  postAction(`/api/v1/projects/${tenantId}/${profileSlug}/actions/drain`),
+);
+{
+  const s = await getStateJson();
+  const p = s.profiles.find((x) => x.tenant_id === tenantId && x.slug === profileSlug);
+  const ok = p?.status === "draining" && p?.agent?.status === "draining";
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] project.status mirrored to D1+agent: D1=${p?.status} agent=${p?.agent?.status}`);
+  if (!ok) failures++;
+}
+await probe("POST project resume", 200, () =>
+  postAction(`/api/v1/projects/${tenantId}/${profileSlug}/actions/resume`),
+);
+
+// 3. Invalid transition: tenant suspend then drain (drain not allowed on tenant)
+const invalidRes = await fetch(`${WORKER_URL}/api/v1/tenants/${tenantId}/actions/drain`, {
+  method: "POST",
+  headers: auth,
+});
+{
+  const ok = invalidRes.status === 404;
+  console.error(`${stamp()} [${ok ? "PASS" : "FAIL"}] tenant 'drain' route does not exist (404 expected, got ${invalidRes.status})`);
+  if (!ok) failures++;
+}
+
 if (failures > 0) {
   console.error(`\nFAIL: ${failures} probe(s) failed`);
   process.exit(1);
