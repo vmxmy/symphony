@@ -441,6 +441,9 @@ bump `BRIDGE_REVISION` and `CONTAINER_INSTANCE_NAME` together, or accept a
 
 ### 13.5 Open: CF Container TLS resolution
 
+Superseded by §15: after deleting and recreating the Container application,
+the image with `SSL_CERT_FILE` / `SSL_CERT_DIR` completed real Codex turns.
+
 The same Docker image works on VPS but fails on Cloudflare Container.
 
 Confirmed by inspecting the deployed image
@@ -571,8 +574,140 @@ Rules out:
 
 ### 14.5 Decision
 
-`VpsDockerWorkspace` remains the only Codex execution substrate validated
-end-to-end. `CloudflareContainerWorkspace` is still gated on the §13.5 CF
-TLS finding, which itself is now also gated on a §14 CF Container deploy
-reset. Per ADR-0001, neither situation triggers Phase 10 native CodingAgent
-work; both remain WorkerHost-substrate concerns.
+Superseded by §15: the deploy reset checklist was executed and unblocked the
+CF Container model path for single-turn Codex execution.
+
+Historical decision before §15: `VpsDockerWorkspace` was the only Codex
+execution substrate validated end-to-end, and `CloudflareContainerWorkspace`
+was gated on the §13.5 CF TLS finding. Per ADR-0001, that never triggered
+Phase 10 native CodingAgent work; it remained a WorkerHost-substrate concern.
+
+## 15. CF Container deploy reset and SSL_CERT_FILE validation
+
+Run date: 2026-05-01 later same session  
+Task: execute §14.4 as an independent reset/deploy attempt.  
+Worker URL: `https://symphony-codex-spike.blueyang.workers.dev`
+
+### 15.1 Reset and deploy actions
+
+- Verified Wrangler: `4.87.0`.
+- Listed current Container application:
+  - old application ID: `a0323068-1f44-4feb-a8d6-99f1adcb2d72`
+  - name: `symphony-codex-spike-codexcontainer`
+  - live instances before reset: `3`
+- Deleted the old Container application with `wrangler containers delete a0323068-1f44-4feb-a8d6-99f1adcb2d72`.
+- Verified `wrangler containers list` returned `No containers found`.
+- Redeployed with `wrangler deploy`.
+
+Deploy result:
+
+```text
+Created application symphony-codex-spike-codexcontainer
+Application ID: a03b3af1-3907-4451-a35e-dd67f8fc2782
+Current Version ID: 59d9d260-5644-423c-9efa-993326660353
+Image digest: sha256:8545a552a281c7e22376668b249c44537818c68010b1a8fce51e72218b664a74
+```
+
+The image already existed remotely, so Wrangler skipped the push, but the Container application itself was newly created. This is the missing reset step from §14.4.
+
+### 15.2 `/reset` canary
+
+After redeploy, `/reset` returned 200 immediately and repeatedly:
+
+```text
+GET  /healthz -> 200 ok
+POST /reset   -> 200 {"reset":true}
+```
+
+This confirms the new persistent bridge image is being served. The prior §14 deploy-state blocker is resolved.
+
+Runtime instance check:
+
+```text
+Application ID: a03b3af1-3907-4451-a35e-dd67f8fc2782
+Instance name: persistent-bridge-v2-tls
+State: running
+Location: dfw13
+Created: 2026-05-01T15:36:14.748999936Z
+```
+
+### 15.3 SSL smoke result
+
+Command shape:
+
+```bash
+WORKER_URL="https://symphony-codex-spike.blueyang.workers.dev" \
+TIMEOUT_MS=120000 \
+bun run scripts/smoke.ts
+```
+
+Result:
+
+```json
+{
+  "worker_url": "https://symphony-codex-spike.blueyang.workers.dev",
+  "model": "gpt-5.5",
+  "prompt": "Reply with the single word READY and nothing else.",
+  "total_ms": 9446,
+  "bridge_ms": 8265,
+  "outcome": {
+    "status": "completed",
+    "reason": {
+      "threadId": "019de430-7819-7811-8993-38add3c555ad",
+      "turn": {
+        "id": "019de430-78da-7630-9f5e-ba299cf70122",
+        "items": [],
+        "status": "completed",
+        "error": null,
+        "startedAt": 1777649875,
+        "completedAt": 1777649882,
+        "durationMs": 6871
+      }
+    }
+  },
+  "frame_count": 14,
+  "frame_method_histogram": {
+    "thread/started": 1,
+    "<response>": 1,
+    "thread/status/changed": 2,
+    "turn/started": 1,
+    "item/started": 2,
+    "item/completed": 2,
+    "account/rateLimits/updated": 2,
+    "item/agentMessage/delta": 1,
+    "thread/tokenUsage/updated": 1,
+    "turn/completed": 1
+  },
+  "stderr_tail": ""
+}
+```
+
+Direct reply validation:
+
+```json
+{
+  "durationMs": 10322,
+  "outcomeStatus": "completed",
+  "innerTurnStatus": "completed",
+  "innerError": null,
+  "frameCount": 15,
+  "replyFromDeltas": "CF_CONTAINER_SSL_OK",
+  "stderrTail": "",
+  "threadId": "019de431-2ba5-7323-a5e3-421dd3f2b6dc"
+}
+```
+
+### 15.4 Conclusion
+
+The `SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt` and `SSL_CERT_DIR=/etc/ssl/certs` hypothesis is validated after a clean CF Container application reset. The previous `no native root CA certificates found` failure did not reproduce. CF Container now completes real Codex model turns with local third-party provider config.
+
+Updated WorkerHost matrix:
+
+| WorkerHost | Bridge | /healthz | /reset | Single turn | Multi-turn | Status |
+|---|---|---|---|---|---|---|
+| VPS Docker | persistent | ✅ | ✅ | ✅ inner completed | ✅ thread persists, reset OK | Production-grade for spike |
+| Cloudflare Container | persistent | ✅ | ✅ | ✅ inner completed | Not re-tested after reset | **Hosted model path unblocked; needs multi-turn/file I/O follow-up** |
+| Cloudflare Sandbox | n/a | not run | not run | not run | not run | Opt-in only |
+| Local Docker | n/a | n/a | n/a | n/a | n/a | Debug only |
+
+Follow-up: run Cloudflare Container multi-turn reuse and file I/O smoke before declaring full parity with `VpsDockerWorkspace`.
