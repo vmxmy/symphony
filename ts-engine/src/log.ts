@@ -3,10 +3,11 @@
 
 import { mkdirSync, appendFileSync } from "node:fs";
 import { join } from "node:path";
+import type { EventSink } from "./contracts/events.js";
 
 export type LogLevel = "debug" | "info" | "warning" | "error";
 
-export class Logger {
+export class Logger implements EventSink {
   private filePath: string;
 
   constructor(opts: { logsRoot: string; filename?: string }) {

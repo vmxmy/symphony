@@ -120,7 +120,7 @@ async function main(): Promise<void> {
     );
 
   const orchestrator = new Orchestrator({
-    linear,
+    tracker: linear,
     workspace,
     state,
     promptBuilder,
