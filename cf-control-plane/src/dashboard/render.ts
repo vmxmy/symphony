@@ -45,11 +45,22 @@ type RunView = {
   token_usage_json?: string | null;
 };
 
+type IssueView = {
+  id: string;
+  identifier: string;
+  title: string | null;
+  state: string;
+  url: string | null;
+  last_seen_at: string;
+  profile_slug?: string | null;
+};
+
 type DashboardState = {
   generated_at: string;
   tenants: TenantView[];
   profiles: ProfileView[];
   runs?: RunView[];
+  issues?: IssueView[];
 };
 
 const ESCAPE_MAP: Record<string, string> = {
@@ -196,6 +207,35 @@ function runsTable(runs: RunView[]): string {
     </table>`;
 }
 
+function issuesTable(issues: IssueView[]): string {
+  if (issues.length === 0) {
+    return `<p class="empty">No issues mirrored. POST /api/v1/projects/&lt;tenant&gt;/&lt;slug&gt;/actions/refresh to pull tracker state.</p>`;
+  }
+  const rows = issues
+    .map((i) => {
+      const titleCell = i.url
+        ? `<a href="${escape(i.url)}" target="_blank" rel="noopener">${escape(i.title ?? i.identifier)}</a>`
+        : escape(i.title ?? i.identifier);
+      const stateClass = i.state.toLowerCase().replace(/\s+/g, "_");
+      return `
+        <tr>
+          <td><code>${escape(i.identifier)}</code></td>
+          <td>${titleCell}</td>
+          <td><span class="status-${escape(stateClass)}">${escape(i.state)}</span></td>
+          <td>${escape(i.profile_slug ?? "-")}</td>
+          <td><time>${escape(i.last_seen_at)}</time></td>
+        </tr>`;
+    })
+    .join("");
+  return `
+    <table>
+      <thead>
+        <tr><th>identifier</th><th>title</th><th>state</th><th>profile</th><th>last_seen</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
 function safeParse<T>(raw: string | null): T | null {
   if (!raw) return null;
   try {
@@ -207,6 +247,7 @@ function safeParse<T>(raw: string | null): T | null {
 
 export function renderDashboard(state: DashboardState): string {
   const runs = state.runs ?? [];
+  const issues = state.issues ?? [];
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -229,6 +270,11 @@ export function renderDashboard(state: DashboardState): string {
   <section>
     <h2>Profiles (${state.profiles.length})</h2>
     ${profilesTable(state.profiles)}
+  </section>
+
+  <section>
+    <h2>Issues (${issues.length})</h2>
+    ${issuesTable(issues)}
   </section>
 
   <section>

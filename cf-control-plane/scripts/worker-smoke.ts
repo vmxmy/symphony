@@ -168,6 +168,38 @@ const invalidRes = await fetch(`${WORKER_URL}/api/v1/tenants/${tenantId}/actions
   if (!ok) failures++;
 }
 
+// ---- refresh probe (Phase 3 US-004) --------------------------------------
+//
+// Skipped when LINEAR_PROBE_SKIP=1 — used in CI / preview envs where
+// LINEAR_API_KEY is not provisioned on the deployed Worker.
+console.error("\n[refresh probe]");
+if (process.env.LINEAR_PROBE_SKIP === "1") {
+  console.error(`${stamp()} [SKIP] LINEAR_PROBE_SKIP=1`);
+} else {
+  const refreshRes = await fetch(
+    `${WORKER_URL}/api/v1/projects/${tenantId}/${profileSlug}/actions/refresh`,
+    { method: "POST", headers: auth },
+  );
+  const refreshBody = await refreshRes.text();
+  let parsed: unknown = null;
+  try { parsed = JSON.parse(refreshBody); } catch { /* keep null */ }
+  const ok =
+    refreshRes.status === 200 &&
+    parsed !== null &&
+    typeof parsed === "object" &&
+    Array.isArray((parsed as { decisions?: unknown }).decisions) &&
+    typeof (parsed as { mirrored?: unknown }).mirrored === "object";
+  console.error(
+    `${stamp()} [${ok ? "PASS" : "FAIL"}] POST refresh: HTTP=${refreshRes.status} ` +
+      (ok
+        ? `decisions=${(parsed as { decisions: unknown[] }).decisions.length} ` +
+          `mirrored=${JSON.stringify((parsed as { mirrored: unknown }).mirrored)} ` +
+          `cleaned_up=${(parsed as { cleaned_up?: number }).cleaned_up ?? "?"}`
+        : `body=${refreshBody.slice(0, 200)}`),
+  );
+  if (!ok) failures++;
+}
+
 if (failures > 0) {
   console.error(`\nFAIL: ${failures} probe(s) failed`);
   process.exit(1);

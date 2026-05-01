@@ -23,6 +23,9 @@ import {
   sessionCookieHeader,
   sessionClearCookieHeader,
 } from "./dashboard/auth.js";
+import { LinearGraphqlClient } from "./tracker/linear.js";
+import type { LinearTrackerConfig } from "./tracker/types.js";
+import { extractLinearTrackerConfig } from "./tracker/config.js";
 
 export { TenantAgent, ProjectAgent };
 
@@ -33,6 +36,9 @@ interface Env {
   // Bearer token for the placeholder auth gate. If unset, the Worker fails
   // closed: every authenticated route returns 503.
   OPERATOR_TOKEN?: string;
+  // Linear API key (single-tenant for Phase 3 first cut; per-tenant
+  // secrets land with Phase 8 ToolGatewayAgent).
+  LINEAR_API_KEY?: string;
 }
 
 function tenantAgentFor(env: Env, tenantId: string) {
@@ -225,7 +231,7 @@ export default {
           },
         });
       }
-      const [tenants, profiles, runsRes] = await Promise.all([
+      const [tenants, profiles, runsRes, issuesRes] = await Promise.all([
         listTenantsWithAgentState(env),
         listProfilesWithAgentState(env),
         env.DB.prepare(
@@ -238,12 +244,22 @@ export default {
             ORDER BY r.started_at DESC
             LIMIT 20`,
         ).all<Record<string, unknown>>(),
+        env.DB.prepare(
+          `SELECT i.id, i.identifier, i.title, i.state, i.url,
+                  i.last_seen_at, p.slug AS profile_slug
+             FROM issues i
+             LEFT JOIN profiles p ON p.id = i.profile_id
+            WHERE i.archived_at IS NULL
+            ORDER BY i.last_seen_at DESC
+            LIMIT 50`,
+        ).all<Record<string, unknown>>(),
       ]);
       const html = renderDashboard({
         generated_at: new Date().toISOString(),
         tenants: tenants as Parameters<typeof renderDashboard>[0]["tenants"],
         profiles: profiles as Parameters<typeof renderDashboard>[0]["profiles"],
         runs: (runsRes.results ?? []) as Parameters<typeof renderDashboard>[0]["runs"],
+        issues: (issuesRes.results ?? []) as Parameters<typeof renderDashboard>[0]["issues"],
       });
       return new Response(html, {
         status: 200,
@@ -307,6 +323,41 @@ export default {
           return jsonResponse({ tenant: result });
         } catch (e) {
           return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
+        }
+      }
+
+      // ---- tracker debug routes (Phase 3 US-002) ------------------------
+      const trackerProbe = url.pathname.match(
+        /^\/api\/v1\/profiles\/([^/]+)\/([^/]+)\/tracker\/(active|terminal)$/,
+      );
+      if (trackerProbe) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const [, tenantId, slug, kind] = trackerProbe;
+        const cfg = await loadLinearTrackerConfig(env, tenantId!, slug!);
+        if (!cfg.ok) {
+          return jsonResponse(
+            { error: cfg.error, detail: cfg.detail ?? null },
+            { status: cfg.status },
+          );
+        }
+        try {
+          const client = new LinearGraphqlClient(cfg.config);
+          const issues =
+            kind === "active"
+              ? await client.fetchActiveIssues()
+              : await client.fetchTerminalIssues();
+          return jsonResponse({
+            count: issues.length,
+            kind,
+            tenant: tenantId,
+            slug,
+            issues: issues.map(shapeIssueForDebug),
+          });
+        } catch (e) {
+          return jsonResponse(
+            { error: "linear_fetch_failed", detail: String((e as Error).message) },
+            { status: 502 },
+          );
         }
       }
 
@@ -384,6 +435,29 @@ export default {
         return jsonResponse({ runs: results ?? [] });
       }
 
+      // ---- refresh: tracker poll + reconcile + D1 mirror (Phase 3 US-004) ----
+      const refresh = url.pathname.match(
+        /^\/api\/v1\/projects\/([^/]+)\/([^/]+)\/actions\/refresh$/,
+      );
+      if (refresh) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const [, tenantId, slug] = refresh;
+        try {
+          const stub = projectAgentFor(env, tenantId!, slug!);
+          const result = await stub.poll(tenantId!, slug!);
+          return jsonResponse(result);
+        } catch (e) {
+          const msg = String((e as Error).message);
+          const status =
+            msg.startsWith("profile_not_found") ? 404
+            : msg.startsWith("linear_api_key_unset") ? 500
+            : msg.startsWith("tracker_kind_unsupported") ? 400
+            : msg.startsWith("tracker_config_incomplete") ? 500
+            : 502;
+          return jsonResponse({ error: "refresh_failed", message: msg }, { status });
+        }
+      }
+
       const projectAction = url.pathname.match(
         /^\/api\/v1\/projects\/([^/]+)\/([^/]+)\/actions\/(pause|resume|drain)$/,
       );
@@ -408,6 +482,77 @@ export default {
     return notFound();
   },
 };
+
+/**
+ * Load a profile from D1 and produce a LinearTrackerConfig for the Worker
+ * debug routes. Returns a discriminated union the caller maps to HTTP
+ * status; field-level parsing lives in tracker/config.ts so ProjectAgent
+ * can share the same canonicalization.
+ */
+async function loadLinearTrackerConfig(
+  env: Env,
+  tenantId: string,
+  slug: string,
+): Promise<
+  | { ok: true; config: LinearTrackerConfig }
+  | { ok: false; status: number; error: string; detail?: string }
+> {
+  const row = await env.DB.prepare(
+    `SELECT tracker_kind, config_json FROM profiles
+     WHERE tenant_id = ? AND slug = ? AND archived_at IS NULL`,
+  )
+    .bind(tenantId, slug)
+    .first<{ tracker_kind: string; config_json: string }>();
+  if (!row) return { ok: false, status: 404, error: "profile_not_found" };
+  if (row.tracker_kind !== "linear") {
+    return {
+      ok: false,
+      status: 400,
+      error: "tracker_kind_unsupported",
+      detail: `expected 'linear', got '${row.tracker_kind}'`,
+    };
+  }
+  if (!env.LINEAR_API_KEY) {
+    return {
+      ok: false,
+      status: 500,
+      error: "linear_api_key_unset",
+      detail: "LINEAR_API_KEY Worker secret is not configured",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.config_json);
+  } catch (e) {
+    return {
+      ok: false,
+      status: 500,
+      error: "config_json_parse_failed",
+      detail: String((e as Error).message),
+    };
+  }
+  const extracted = extractLinearTrackerConfig(parsed, env.LINEAR_API_KEY);
+  if (!extracted.ok) {
+    return { ok: false, status: 500, error: extracted.code, detail: extracted.detail };
+  }
+  return { ok: true, config: extracted.config };
+}
+
+function shapeIssueForDebug(issue: {
+  id: string;
+  identifier: string;
+  state: string;
+  title: string | null;
+  url: string | null;
+}) {
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    state: issue.state,
+    title: issue.title,
+    url: issue.url,
+  };
+}
 
 async function listTenantsWithAgentState(env: Env) {
   const base = (await listTenants(env)) as Array<{ id: string; [k: string]: unknown }>;
