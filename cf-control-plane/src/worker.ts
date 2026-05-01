@@ -16,6 +16,7 @@
 
 import { TenantAgent } from "./agents/tenant.js";
 import { ProjectAgent } from "./agents/project.js";
+import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard } from "./dashboard/render.js";
 import {
   getSession,
@@ -224,14 +225,25 @@ export default {
           },
         });
       }
-      const [tenants, profiles] = await Promise.all([
+      const [tenants, profiles, runsRes] = await Promise.all([
         listTenantsWithAgentState(env),
         listProfilesWithAgentState(env),
+        env.DB.prepare(
+          `SELECT r.id, r.issue_id, r.attempt, r.status, r.adapter_kind,
+                  r.started_at, r.finished_at, r.error, r.token_usage_json,
+                  i.identifier AS issue_identifier
+             FROM runs r
+             LEFT JOIN issues i ON i.id = r.issue_id
+            WHERE r.archived_at IS NULL
+            ORDER BY r.started_at DESC
+            LIMIT 20`,
+        ).all<Record<string, unknown>>(),
       ]);
       const html = renderDashboard({
         generated_at: new Date().toISOString(),
         tenants: tenants as Parameters<typeof renderDashboard>[0]["tenants"],
         profiles: profiles as Parameters<typeof renderDashboard>[0]["profiles"],
+        runs: (runsRes.results ?? []) as Parameters<typeof renderDashboard>[0]["runs"],
       });
       return new Response(html, {
         status: 200,
@@ -296,6 +308,80 @@ export default {
         } catch (e) {
           return jsonResponse({ error: "transition_rejected", message: String((e as Error).message) }, { status: 409 });
         }
+      }
+
+      // ---- mock orchestration (Phase 2 last cut; Phase 3 replaces) ----
+      const mockRun = url.pathname.match(
+        /^\/api\/v1\/projects\/([^/]+)\/([^/]+)\/issues\/([^/]+)\/actions\/mock-run$/,
+      );
+      if (mockRun) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const [, tenantId, slug, identifier] = mockRun;
+        const profileRow = await env.DB.prepare(
+          `SELECT id, tenant_id, slug FROM profiles WHERE tenant_id = ? AND slug = ?`,
+        )
+          .bind(tenantId!, slug!)
+          .first<{ id: string; tenant_id: string; slug: string }>();
+        if (!profileRow) {
+          return jsonResponse({ error: "profile_not_found", tenant: tenantId, slug }, { status: 404 });
+        }
+        const result = await executeMockRun(env, {
+          profile: profileRow,
+          issueIdentifier: identifier!,
+        });
+        return jsonResponse({ run: result });
+      }
+
+      // ---- run inspection -----------------------------------------------
+      const runDetail = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)$/);
+      if (runDetail) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const runId = runDetail[1]!;
+        const [run, events, toolCalls] = await Promise.all([
+          env.DB.prepare(
+            `SELECT id, issue_id, attempt, status, adapter_kind,
+                    started_at, finished_at, error, token_usage_json
+               FROM runs WHERE id = ?`,
+          )
+            .bind(runId)
+            .first<Record<string, unknown>>(),
+          env.DB.prepare(
+            `SELECT id, event_type, severity, message, created_at
+               FROM run_events WHERE run_id = ? ORDER BY created_at`,
+          )
+            .bind(runId)
+            .all(),
+          env.DB.prepare(
+            `SELECT id, turn_number, tool_name, status, started_at, finished_at
+               FROM tool_calls WHERE run_id = ? ORDER BY started_at`,
+          )
+            .bind(runId)
+            .all(),
+        ]);
+        if (!run) return jsonResponse({ error: "run_not_found", run_id: runId }, { status: 404 });
+        return jsonResponse({
+          run: {
+            ...run,
+            token_usage: safeJsonParse<unknown>(run.token_usage_json as string | null, null),
+          },
+          events: events.results ?? [],
+          tool_calls: toolCalls.results ?? [],
+        });
+      }
+
+      if (url.pathname === "/api/v1/runs") {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const { results } = await env.DB.prepare(
+          `SELECT r.id AS id, r.issue_id, r.attempt, r.status, r.adapter_kind,
+                  r.started_at, r.finished_at, r.error, r.token_usage_json,
+                  i.identifier AS issue_identifier
+             FROM runs r
+             LEFT JOIN issues i ON i.id = r.issue_id
+            WHERE r.archived_at IS NULL
+            ORDER BY r.started_at DESC
+            LIMIT 50`,
+        ).all<Record<string, unknown>>();
+        return jsonResponse({ runs: results ?? [] });
       }
 
       const projectAction = url.pathname.match(
