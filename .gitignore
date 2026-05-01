@@ -63,3 +63,6 @@ WORKFLOW.md.notes
 # Local-only oh-my-* state
 .omc/
 .omx/
+
+# Track spike Docker context filters even if a global gitignore ignores them.
+!spikes/codex-on-cloudflare/.dockerignore
