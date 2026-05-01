@@ -63,3 +63,7 @@ WORKFLOW.md.notes
 # Local-only oh-my-* state
 .omc/
 .omx/
+
+# Track sub-package gitignores even if the user's global *.gitignore rule
+# would normally hide them.
+!cf-control-plane/.gitignore
