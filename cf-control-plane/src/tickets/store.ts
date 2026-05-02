@@ -73,13 +73,16 @@ export async function getTicketSourceByExternalId(
   sourceKind: string,
   externalId: string,
 ): Promise<TicketSource | null> {
+  const normalizedExternalId = normalizeExternalId(externalId);
+  if (!normalizedExternalId) return null;
+
   const row = await db
     .prepare(
       `SELECT *
          FROM ticket_sources
         WHERE tenant_id = ? AND source_kind = ? AND external_id = ?`,
     )
-    .bind(tenantId, sourceKind, externalId)
+    .bind(tenantId, sourceKind, normalizedExternalId)
     .first<TicketSourceRow>();
   return row ? sourceFromRow(row) : null;
 }
@@ -88,13 +91,18 @@ export async function createOrGetTicketFromSource(
   db: D1Database,
   input: CreateOrGetTicketFromSourceInput,
 ): Promise<TicketSourceResult> {
-  if (input.externalId) {
-    const existingSource = await getTicketSourceByExternalId(db, input.tenantId, input.sourceKind, input.externalId);
+  validateTicketTenant(input.tenantId, input.ticket);
+
+  const externalId = normalizeExternalId(input.externalId);
+  if (externalId) {
+    const existingSource = await getTicketSourceByExternalId(db, input.tenantId, input.sourceKind, externalId);
     if (existingSource) {
       const source = await updateSourceMetadata(db, existingSource, input, input.now);
       const ticket = await requireTicket(db, source.ticketId);
       return { ticket, source, createdTicket: false, createdSource: false };
     }
+
+    return await createOrGetTicketFromExternalSource(db, input, externalId);
   }
 
   const ticketResult = await createOrGetTicketByKey(db, input.ticket, input.now);
@@ -103,11 +111,61 @@ export async function createOrGetTicketFromSource(
     tenantId: input.tenantId,
     ticketId: ticketResult.ticket.id,
     sourceKind: input.sourceKind,
-    externalId: input.externalId ?? null,
+    externalId: null,
     externalKey: input.externalKey ?? null,
     externalUrl: input.externalUrl ?? null,
     now: input.now,
   });
+
+  return {
+    ticket: ticketResult.ticket,
+    source,
+    createdTicket: ticketResult.created,
+    createdSource: true,
+  };
+}
+
+async function createOrGetTicketFromExternalSource(
+  db: D1Database,
+  input: CreateOrGetTicketFromSourceInput,
+  externalId: string,
+): Promise<TicketSourceResult> {
+  const ticketResult = await createOrGetTicketByKey(db, input.ticket, input.now);
+  const sourceId = input.sourceId ?? crypto.randomUUID();
+
+  const result = await db
+    .prepare(
+      `INSERT OR IGNORE INTO ticket_sources (
+         id, tenant_id, ticket_id, source_kind, external_id, external_key,
+         external_url, sync_status, last_synced_at, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
+    )
+    .bind(
+      sourceId,
+      input.tenantId,
+      ticketResult.ticket.id,
+      input.sourceKind,
+      externalId,
+      input.externalKey ?? null,
+      input.externalUrl ?? null,
+      input.now,
+      input.now,
+      input.now,
+    )
+    .run();
+
+  if (result.meta.changes === 0) {
+    if (ticketResult.created) await deleteTicketIfUnreferenced(db, ticketResult.ticket.id);
+
+    const existingSource = await getTicketSourceByExternalId(db, input.tenantId, input.sourceKind, externalId);
+    if (!existingSource) throw new Error(`ticket_source_conflict_not_found:${input.tenantId}:${input.sourceKind}:${externalId}`);
+
+    const source = await updateSourceMetadata(db, existingSource, input, input.now);
+    const ticket = await requireTicket(db, source.ticketId);
+    return { ticket, source, createdTicket: false, createdSource: false };
+  }
+
+  const source = await requireTicketSource(db, sourceId);
 
   return {
     ticket: ticketResult.ticket,
@@ -128,10 +186,12 @@ async function createOrGetTicketByKey(
     .first<TicketRow>();
   if (existing) return { ticket: ticketFromRow(existing), created: false };
 
+  await assertTicketIdAvailableForKey(db, input);
+
   const id = input.id ?? crypto.randomUUID();
-  await db
+  const result = await db
     .prepare(
-      `INSERT INTO tickets (
+      `INSERT OR IGNORE INTO tickets (
          id, tenant_id, key, type, title, description, requester, owner,
          priority, status, workflow_key, workflow_version, input_json,
          tags_json, created_at, updated_at
@@ -157,7 +217,13 @@ async function createOrGetTicketByKey(
     )
     .run();
 
-  return { ticket: await requireTicket(db, id), created: true };
+  const row = await db
+    .prepare(`SELECT * FROM tickets WHERE tenant_id = ? AND key = ?`)
+    .bind(input.tenantId, input.key)
+    .first<TicketRow>();
+  if (!row) throw new Error(`ticket_not_found_after_insert:${input.tenantId}:${input.key}`);
+
+  return { ticket: ticketFromRow(row), created: result.meta.changes > 0 };
 }
 
 async function createTicketSource(
@@ -199,6 +265,23 @@ async function createTicketSource(
   return sourceFromRow(row);
 }
 
+async function requireTicketSource(db: D1Database, sourceId: string): Promise<TicketSource> {
+  const row = await db.prepare(`SELECT * FROM ticket_sources WHERE id = ?`).bind(sourceId).first<TicketSourceRow>();
+  if (!row) throw new Error(`ticket_source_not_found:${sourceId}`);
+  return sourceFromRow(row);
+}
+
+async function deleteTicketIfUnreferenced(db: D1Database, ticketId: string): Promise<void> {
+  await db
+    .prepare(
+      `DELETE FROM tickets
+        WHERE id = ?
+          AND NOT EXISTS (SELECT 1 FROM ticket_sources WHERE ticket_id = ?)`,
+    )
+    .bind(ticketId, ticketId)
+    .run();
+}
+
 async function updateSourceMetadata(
   db: D1Database,
   existing: TicketSource,
@@ -235,6 +318,24 @@ async function requireTicket(db: D1Database, id: string): Promise<Ticket> {
   const ticket = await getTicketById(db, id);
   if (!ticket) throw new Error(`ticket_not_found:${id}`);
   return ticket;
+}
+
+async function assertTicketIdAvailableForKey(db: D1Database, input: CreateTicketInput): Promise<void> {
+  if (!input.id) return;
+
+  const existing = await getTicketById(db, input.id);
+  if (existing && (existing.tenantId !== input.tenantId || existing.key !== input.key)) {
+    throw new Error(`ticket_id_conflict:${input.id}`);
+  }
+}
+
+function validateTicketTenant(tenantId: string, ticket: CreateTicketInput): void {
+  if (ticket.tenantId !== tenantId) throw new Error(`ticket_tenant_mismatch:${tenantId}:${ticket.tenantId}`);
+}
+
+function normalizeExternalId(externalId: string | null | undefined): string | null {
+  const trimmed = externalId?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function ticketFromRow(row: TicketRow): Ticket {
