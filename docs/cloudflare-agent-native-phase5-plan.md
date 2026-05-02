@@ -337,6 +337,40 @@ follows the same principle.
 - [x] `docs/cloudflare-agent-native-target.md` §1140–1158 status sync (PR-E).
 - [x] `docs/cloudflare-agent-native-phase5-plan.md` — this file (PR-E).
 
+### 6.1 Merge log (origin/main)
+
+All five Phase 5 PRs (#20–24) merged to `vmxmy/symphony main` on
+2026-05-03 via `gh pr merge --rebase`. Phase 4 sub-cut 3 PRs (#16–19)
+were merged in the same window because Phase 5 PRs depended on their
+commits being on main first. Original branch SHAs were rebased onto
+the new main HEAD, so post-merge SHAs differ from the per-PR SHAs
+recorded in §6 above. Mapping:
+
+| PR | Title | Original head | Post-rebase merge commit |
+|---|---|---|---|
+| #16 | Phase 4 sub-cut 3 PR-A (backoff helper + state machine) | `edc4a41` | `11c2fd2` |
+| #17 | Phase 4 sub-cut 3 PR-B (D1 retry mirror + reconcile gate) | `78ba823` | `0f7f264` |
+| #18 | Phase 4 sub-cut 3 PR-C (markFailed + retryNow + alarm + admin routes) | `0a056be` | `03d593d` |
+| #19 | Phase 4 sub-cut 3 PR-D (Retries dashboard + failed-row mirror + docs sync + pause/cancel retry mirror cleanup) | `453a0d4` | `8259904` + `b6a2abc` |
+| #20 | Phase 5 PR-A (ExecutionWorkflow scaffold + R2 binding) | `01c26c1` | `f52a621` |
+| #21 | Phase 5 PR-B (IssueAgent.startRun + running/completed + lease) | `bed787a` | `e8baac5` |
+| #22 | Phase 5 PR-C (16-step ExecutionWorkflow + MockCodingAgentAdapter + R2 manifest) | `c0b8251` | `63d8ca1` |
+| #23 | Phase 5 PR-D (operator routes + dashboard run view) | `15085be` | `e822c0e` |
+| #24 | Phase 5 PR-E (close Phase 5 — `@deprecated` mock_run, status sync; architect review fix; deslop) | `932a009` / `4e1e6f0` / `2680893` | `07a10e2` / `f1086b7` / `6d667fa` |
+
+No merge conflicts were resolved during the run; each rebase auto-skipped
+already-applied commits on top of the new main HEAD. Phase 5 plan §6
+SHAs above intentionally preserve the per-PR identity for review
+traceability; the merge log here is the post-merge reverse map.
+
+Post-merge verification (2026-05-03, on `main` HEAD `6d667fa`):
+
+- `cf-control-plane`: `bunx tsc --noEmit` clean; `bun test` 90 pass / 0
+  fail / 372 expect calls / 17 files (Phase 5 close baseline preserved).
+- `ts-engine`: `make all` green from repo root (19 pass / 84 expect calls;
+  bun build to `bin/symphony-ts` succeeds).
+- All 9 PR head branches deleted on origin and locally.
+
 ## 7. Acceptance Criteria
 
 A1. End-to-end mock run: enqueueing an `IssueDispatchMessage` for a known
