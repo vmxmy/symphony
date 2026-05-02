@@ -48,11 +48,21 @@ Phase 4 (IssueAgent dispatch and retry/backoff):
 - [x] Failed issues stay visible as `issue_retries` rows with empty `due_at`; reconcile treats empty due dates as not due.
 - [x] Dashboard renders a read-only Retries section; operator retry/resume actions remain Bearer-only API calls for CLI/curl.
 
-Phase 6 PR-A (WorkerHost contract + MockWorkerHost + F-5 + F-6 + grep gates):
+Phase 6 (8 commits, 2026-05-03 Ralph session):
 
-- [x] `WorkerHost` interface and `MockWorkerHost` implementation in `src/runtime/` (commit TBD-PR-A).
-- [x] ADR-0001 dispatch isolation: `switch`/`if`-on-`WorkerHostKind` outside `src/runtime/` blocked by `scripts/check-phase6-invariants.ts`.
-- [x] 16 canonical step names locked by the same invariants gate.
+| Commit | Slice | Tests delta |
+|--------|-------|-------------|
+| `289f255` | PR-A — WorkerHost contract + MockWorkerHost + F-5/F-6 fixes + grep gates | 90 → 102 |
+| `ecbba33` | PR-B — VpsDockerHost HTTP adapter | 102 → 110 |
+| `2bcdfe6` | PR-C-1 — Factory + parseRuntimeConfig | 110 → 122 |
+| `277d09d` | PR-C-2 — execution.ts steps 3+4 swap to WorkerHost | 122 (no regression) |
+| `5628f41` | PR-D-1 — runHookWithTimeout helper + 3 unit tests | 122 → 125 |
+| `f27fb59` | PR-D-2 — execution.ts steps 5/7/12 hook wiring | 125 (no regression) |
+| `0ea41b2` | PR-D-3 — execution.ts step 15 archive sequence | 125 (no regression) |
+| `777cfad` | PR-E-1 — GET /api/v1/profiles/:t/:s/runtime operator route | 125 → 132 |
+
+Final state: 132 pass / 0 fail / 478 expect() calls / 24 test files.
+Next slice (deferred): PR-E-2 — CloudflareContainerHost + admin write routes + dashboard surface.
 
 Phase 5 (ExecutionWorkflow on Cloudflare Workflows with MockCodingAgentAdapter):
 

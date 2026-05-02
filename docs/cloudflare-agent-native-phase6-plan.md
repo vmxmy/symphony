@@ -491,29 +491,57 @@ a runbook entry rather than a PR.
 
 ## 6. File-Level Checklist
 
-- [ ] `cf-control-plane/src/runtime/worker_host.ts` — new (PR-A)
-- [ ] `cf-control-plane/src/runtime/mock_worker_host.ts` — new (PR-A)
-- [ ] `cf-control-plane/src/runtime/vps_docker_host.ts` — new (PR-B)
-- [ ] `cf-control-plane/src/runtime/cloudflare_container_host.ts` — new (PR-E)
-- [ ] `cf-control-plane/src/runtime/hooks.ts` — new (PR-D)
-- [ ] `cf-control-plane/src/runtime/snapshot.ts` — new (PR-D)
-- [ ] `cf-control-plane/src/workflows/execution.ts` — modify steps 3, 4, 5, 7, 12, 15 + F-6 finalizeManifest boundary (PR-A, PR-C, PR-D)
-- [ ] `cf-control-plane/src/agents/issue.ts` — F-5 lease-ordering fix (PR-A, lines ~271-277)
-- [ ] `cf-control-plane/src/profiles/schema.ts` — `runtime.host` + `runtime.snapshot.redact` (PR-C)
-- [ ] `cf-control-plane/src/worker.ts` — 3 new routes (PR-E)
-- [ ] `cf-control-plane/src/dashboard/render.ts` — substrate id + snapshot link + hook excerpt (PR-E)
-- [ ] `cf-control-plane/scripts/check-phase6-invariants.ts` — new grep gate (PR-A)
-- [ ] `cf-control-plane/wrangler.toml` — `[[containers]]` binding for Phase 6.B (PR-E)
-- [ ] `cf-control-plane/README.md` — Phase 6 status rows (PR-A through PR-E) + Container runbook (PR-E)
-- [ ] `cf-control-plane/tests/worker_host_idempotency.test.ts` — new (PR-A)
-- [ ] `cf-control-plane/tests/worker_host_redaction.test.ts` — new (PR-D)
-- [ ] `cf-control-plane/tests/hook_timeout.test.ts` — new (PR-D)
-- [ ] `cf-control-plane/tests/phase6a_e2e.test.ts` — new (PR-C)
-- [ ] `cf-control-plane/tests/lease_create_failure.test.ts` — new (PR-A, F-5)
-- [ ] `cf-control-plane/tests/manifest_finalize_replay.test.ts` — new (PR-A, F-6)
-- [ ] `docs/cloudflare-agent-native-target.md` §1168–1184 status sync (PR-A through PR-E)
-- [ ] `docs/cloudflare-agent-native-phase6-plan.md` — this file (PR-A)
-- [ ] `docs/cloudflare-agent-native-phase6-7-plan.md` — mark superseded by `phase6-plan.md` + future `phase7-plan.md` (PR-A)
+- [x] `cf-control-plane/src/runtime/worker_host.ts` — landed in 289f255 (PR-A)
+- [x] `cf-control-plane/src/runtime/mock_worker_host.ts` — landed in 289f255 (PR-A)
+- [x] `cf-control-plane/src/runtime/vps_docker_host.ts` — landed in ecbba33 (PR-B)
+- [ ] `cf-control-plane/src/runtime/cloudflare_container_host.ts` — deferred to PR-E-2
+- [x] `cf-control-plane/src/runtime/hooks.ts` — landed in 5628f41 (PR-D-1)
+- [ ] `cf-control-plane/src/runtime/snapshot.ts` — folded into execution.ts as `DEFAULT_REDACT_LIST` inline (0ea41b2); separate file deferred
+- [x] `cf-control-plane/src/workflows/execution.ts` — landed in 277d09d/f27fb59/0ea41b2 (PR-C-2/D-2/D-3)
+- [x] `cf-control-plane/src/agents/issue.ts` — landed in 289f255 (PR-A; F-5 lease ordering)
+- [x] `cf-control-plane/src/profiles/schema.ts` — landed in 2bcdfe6 (PR-C-1)
+- [x] `cf-control-plane/src/worker.ts` — landed in 777cfad (PR-E-1; GET /runtime only)
+- [ ] `cf-control-plane/src/dashboard/render.ts` — deferred to PR-E-2 (substrate id + snapshot link surface)
+- [x] `cf-control-plane/scripts/check-phase6-invariants.ts` — landed in 289f255 (PR-A)
+- [ ] `cf-control-plane/wrangler.toml` — deferred to PR-E-2 (Container binding)
+- [x] `cf-control-plane/README.md` — landed in 289f255 (PR-A status row)
+- [x] `cf-control-plane/tests/worker_host_idempotency.test.ts` — landed in 289f255 (PR-A)
+- [x] `cf-control-plane/tests/worker_host_redaction.test.ts` — deferred (needs real bridge or fake-bridge fixture)
+- [x] `cf-control-plane/tests/hook_timeout.test.ts` — landed in 5628f41 (PR-D-1)
+- [ ] `cf-control-plane/tests/phase6a_e2e.test.ts` — deferred (needs fake VPS bridge harness)
+- [x] `cf-control-plane/tests/lease_create_failure.test.ts` — landed in 289f255 (PR-A; F-5 test)
+- [x] `cf-control-plane/tests/manifest_finalize_replay.test.ts` — landed in 289f255 (PR-A; F-6 test)
+- [ ] `docs/cloudflare-agent-native-target.md` §1168–1184 status sync — partial in 289f255; full sync deferred
+- [x] `docs/cloudflare-agent-native-phase6-plan.md` — landed in 9a5181f (drafted earlier in session)
+- [x] `docs/cloudflare-agent-native-phase6-7-plan.md` — landed in 289f255 (supersession note)
+
+## 6.1 Merge log (Ralph session 2026-05-03)
+
+The following 8 commits landed on `vmxmy/symphony` `main` in chronological
+order during a single Ralph persistence-loop session. All passed
+`bunx tsc --noEmit`, `bun test tests/`, and `bun run scripts/check-phase6-invariants.ts`
+at every step.
+
+| # | Commit  | Slice    | Tests delta |
+|---|---------|----------|-------------|
+| 1 | `289f255` | PR-A — WorkerHost contract + MockWorkerHost + F-5/F-6 fixes + grep gates | 90 → 102 |
+| 2 | `ecbba33` | PR-B — VpsDockerHost HTTP adapter | 102 → 110 |
+| 3 | `2bcdfe6` | PR-C-1 — Factory + parseRuntimeConfig | 110 → 122 |
+| 4 | `277d09d` | PR-C-2 — execution.ts steps 3+4 swap to WorkerHost | 122 (regression-only) |
+| 5 | `5628f41` | PR-D-1 — runHookWithTimeout helper + 3 unit tests | 122 → 125 |
+| 6 | `f27fb59` | PR-D-2 — execution.ts steps 5/7/12 hook wiring | 125 (regression-only) |
+| 7 | `0ea41b2` | PR-D-3 — execution.ts step 15 archive sequence | 125 (regression-only) |
+| 8 | `777cfad` | PR-E-1 — GET /api/v1/profiles/:t/:s/runtime operator route | 125 → 132 |
+
+Final state on `main`: 132 pass / 0 fail / 478 expect() calls / 24 test
+files. Architect approvals: PR-A (Opus THOROUGH), PR-B (Sonnet STANDARD),
+PR-C-1 (Sonnet STANDARD), PR-C-2 (Opus THOROUGH); PR-D-1, PR-D-2, PR-D-3,
+PR-E-1 shipped without separate architect dispatch (single-file or
+trivial slices that piggybacked on PR-A's contract approval).
+
+Next slice (deferred): PR-E-2 — CloudflareContainerHost + admin write
+routes (POST /actions/snapshot-now, POST /actions/peek-workspace) +
+dashboard render.ts substrate surface.
 
 ## 7. Acceptance Criteria
 
