@@ -11,6 +11,13 @@
 import type { WorkerHost, WorkerHostKind } from "./worker_host.js";
 import { MockWorkerHost } from "./mock_worker_host.js";
 import { VpsDockerHost } from "./vps_docker_host.js";
+import type {
+  CodingAgentAdapter,
+  CodingAgentKind,
+} from "../contracts/coding_agent.js";
+import { MockCodingAgent } from "../coding_agents/mock_coding_agent.js";
+
+export type { CodingAgentKind } from "../contracts/coding_agent.js";
 
 export type RuntimeEnv = {
   VPS_BRIDGE_BASE_URL?: string;
@@ -65,5 +72,49 @@ export function pickWorkerHost(env: RuntimeEnv, config: RuntimeConfig): WorkerHo
     }
     case "cloudflare_container":
       throw new Error("not_implemented_yet: cloudflare_container WorkerHost is Phase 6.B / PR-E scope");
+  }
+}
+
+const VALID_CODING_AGENT_KINDS: ReadonlySet<CodingAgentKind> = new Set([
+  "mock",
+  "codex_compat",
+]);
+
+export function parseCodingAgentKind(
+  rawConfigJson: string | null | undefined,
+): CodingAgentKind {
+  if (rawConfigJson === null || rawConfigJson === undefined || rawConfigJson === "") {
+    return "mock";
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawConfigJson);
+  } catch {
+    return "mock";
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return "mock";
+  }
+  const obj = parsed as Record<string, unknown>;
+  const runtime = obj.runtime;
+  if (typeof runtime !== "object" || runtime === null) {
+    return "mock";
+  }
+  const codingAgent = (runtime as Record<string, unknown>).coding_agent;
+  if (
+    typeof codingAgent !== "string" ||
+    !VALID_CODING_AGENT_KINDS.has(codingAgent as CodingAgentKind)
+  ) {
+    return "mock";
+  }
+  return codingAgent as CodingAgentKind;
+}
+
+export function pickCodingAgent(_env: RuntimeEnv, kind: CodingAgentKind): CodingAgentAdapter {
+  switch (kind) {
+    case "mock":
+      return new MockCodingAgent();
+    case "codex_compat":
+      throw new Error("not_implemented_yet: codex_compat is Phase 7 PR-B scope");
   }
 }
