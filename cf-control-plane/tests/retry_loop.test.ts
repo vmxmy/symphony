@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { IssueAgentState, IssueAgentStatus } from "../src/agents/issue.js";
 import type { IssueDispatchMessage } from "../src/queues/types.js";
+import type { ExecutionWorkflowParams } from "../src/workflows/execution.js";
 import { asD1, createMigratedDatabase } from "./support/sqlite_d1.js";
 
 class MockDurableObject {
@@ -63,6 +64,43 @@ function queueRecorder() {
   };
 }
 
+class MockWorkflowInstance implements WorkflowInstance {
+  constructor(public id: string) {}
+
+  async pause(): Promise<void> {}
+
+  async resume(): Promise<void> {}
+
+  async terminate(): Promise<void> {}
+
+  async restart(): Promise<void> {}
+
+  async status(): Promise<InstanceStatus> {
+    return { status: "running" };
+  }
+
+  async sendEvent(_event: { type: string; payload: unknown }): Promise<void> {}
+}
+
+function workflowRecorder() {
+  const creates: Array<{ id?: string; params?: ExecutionWorkflowParams }> = [];
+  const workflow = {
+    async get(id: string) {
+      return new MockWorkflowInstance(id);
+    },
+    async create(options?: WorkflowInstanceCreateOptions<ExecutionWorkflowParams>) {
+      creates.push({ id: options?.id, params: options?.params });
+      return new MockWorkflowInstance(options?.id ?? "generated");
+    },
+    async createBatch(batch: WorkflowInstanceCreateOptions<ExecutionWorkflowParams>[]) {
+      for (const options of batch) creates.push({ id: options.id, params: options.params });
+      return batch.map((options) => new MockWorkflowInstance(options.id ?? "generated"));
+    },
+  } satisfies Workflow<ExecutionWorkflowParams>;
+
+  return { workflow, creates };
+}
+
 function makeAgentHarness(initial?: IssueAgentState) {
   const values = new Map<string, unknown>();
   if (initial) values.set("state", initial);
@@ -88,11 +126,13 @@ function makeAgentHarness(initial?: IssueAgentState) {
   const db = createMigratedDatabase();
   seedTenantAndProfile(db);
   const { messages, queue } = queueRecorder();
+  const { workflow, creates } = workflowRecorder();
   const env = {
     DB: asD1(db),
     DISPATCH: queue,
     PROJECT_AGENT: {} as DurableObjectNamespace,
     ISSUE_AGENT: {} as DurableObjectNamespace,
+    EXECUTION_WORKFLOW: workflow,
   };
   const agent = new IssueAgent({ storage: storage as unknown as DurableObjectStorage } as DurableObjectState, env);
 
@@ -107,6 +147,7 @@ function makeAgentHarness(initial?: IssueAgentState) {
     env,
     alarmTimestamps,
     sentMessages: messages,
+    workflowCreates: creates,
     readState: () => values.get("state") as IssueAgentState | undefined,
     pendingAlarm: () => pendingAlarm,
     deleteAlarmCalls: () => deleteAlarmCalls,
@@ -152,6 +193,45 @@ function issueAgentNamespace(agent: InstanceType<typeof IssueAgent>) {
 }
 
 describe("retry loop", () => {
+  test("v1 issue.dispatch starts the execution workflow after queueing", async () => {
+    const harness = makeAgentHarness(makeState("discovered"));
+    harness.env.ISSUE_AGENT = issueAgentNamespace(harness.agent);
+
+    const outcome = await handleIssueDispatch(harness.env as unknown as Parameters<typeof handleIssueDispatch>[0], {
+      kind: "issue.dispatch",
+      version: 1,
+      tenant_id: IDS.tenantId,
+      slug: IDS.slug,
+      external_id: IDS.externalId,
+      identifier: IDS.externalId,
+      attempt: 0,
+      scheduled_at: new Date().toISOString(),
+    });
+
+    expect(outcome).toMatchObject({
+      external_id: IDS.externalId,
+      identifier: IDS.externalId,
+      agent_status: "running",
+      dispatch_count: 1,
+    });
+    expect(harness.readState()).toMatchObject({
+      status: "running",
+      workflow_instance_id: "run:tenant:profile:issue-1:0",
+    });
+    expect(harness.workflowCreates).toHaveLength(1);
+    expect(harness.workflowCreates[0]).toMatchObject({
+      id: "run:tenant:profile:issue-1:0",
+      params: {
+        tenant_id: IDS.tenantId,
+        slug: IDS.slug,
+        external_id: IDS.externalId,
+        identifier: IDS.externalId,
+        attempt: 0,
+        workflow_instance_id: "run:tenant:profile:issue-1:0",
+      },
+    });
+  });
+
   test("failure injection enters retry_wait, alarm re-dispatches, max attempts fails, and resume preserves attempts", async () => {
     const harness = makeAgentHarness(makeState("discovered"));
     harness.env.ISSUE_AGENT = issueAgentNamespace(harness.agent);
