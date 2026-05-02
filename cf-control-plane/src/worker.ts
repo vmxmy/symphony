@@ -350,7 +350,7 @@ export default {
         return new Response("invalid attempt", { status: 400 });
       }
       const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
-      const [run, steps, events] = await Promise.all([
+      const [run, steps, events, profileRow] = await Promise.all([
         env.DB.prepare(
           `SELECT r.id, r.issue_id, r.attempt, r.status, r.workflow_id, r.adapter_kind,
                   r.started_at, r.finished_at, r.error, r.token_usage_json,
@@ -387,10 +387,14 @@ export default {
             message: string | null;
             created_at: string;
           }>(),
+        env.DB.prepare(
+          `SELECT config_json FROM profiles WHERE id = ?`,
+        ).bind(`${tenantId}/${slug}`).first<{ config_json: string | null }>(),
       ]);
       if (!run) {
         return new Response(`run not found: ${runId}`, { status: 404 });
       }
+      const runtime = parseRuntimeConfig(profileRow?.config_json ?? null);
       const html = renderRunDetail({
         generated_at: new Date().toISOString(),
         run: {
@@ -412,6 +416,7 @@ export default {
         },
         steps: steps.results ?? [],
         events: events.results ?? [],
+        runtime,
       });
       return new Response(html, {
         status: 200,

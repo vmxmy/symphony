@@ -63,6 +63,7 @@ function sampleRun(): RunDetailView {
         created_at: "2026-05-03T00:00:00.500Z",
       },
     ],
+    runtime: { host: "mock" },
   };
 }
 
@@ -105,6 +106,8 @@ describe("renderRunDetail (Phase 5 PR-D)", () => {
     expect(html).toContain("<code>SYM-1</code>");
     expect(html).toContain("total 100 (in 70 / out 30)");
     expect(html).toContain("runs/tenant/profile/issue-1/0/manifest.json");
+    expect(html).toContain("Substrate");
+    expect(html).toContain("<code>mock</code>");
   });
 
   test("missing steps render as pending placeholders", () => {

@@ -372,6 +372,8 @@ export type RunDetailEventView = {
   created_at: string;
 };
 
+import type { WorkerHostKind } from "../runtime/worker_host.js";
+
 export type RunDetailView = {
   generated_at: string;
   run: {
@@ -393,6 +395,7 @@ export type RunDetailView = {
   };
   steps: RunDetailStepView[];
   events: RunDetailEventView[];
+  runtime: { host: WorkerHostKind };
 };
 
 function stepDurationMs(s: RunDetailStepView): number | null {
@@ -504,6 +507,8 @@ export function renderRunDetail(state: RunDetailView): string {
       <dd><span class="status-${escape(state.run.status)}">${escape(state.run.status)}</span></dd>
       <dt>Adapter</dt>
       <dd><code>${escape(state.run.adapter_kind)}</code></dd>
+      <dt>Substrate</dt>
+      <dd><code>${escape(state.runtime.host)}</code></dd>
       <dt>Tenant / Profile</dt>
       <dd><code>${escape(state.run.tenant_id)}</code> / <code>${escape(state.run.slug)}</code></dd>
       <dt>Issue</dt>
