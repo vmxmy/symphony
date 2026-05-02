@@ -12,7 +12,7 @@ class DurableObjectMock<Env = unknown> {
   }
 }
 
-mock.module("cloudflare:workers", () => ({ DurableObject: DurableObjectMock }));
+mock.module("cloudflare:workers", () => ({ DurableObject: DurableObjectMock, WorkflowEntrypoint: class { constructor(_c: unknown, env: unknown) { (this as any).env = env; } } }));
 
 const { ProjectAgent } = await import("../src/agents/project.js");
 
