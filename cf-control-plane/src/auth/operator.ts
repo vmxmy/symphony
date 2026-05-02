@@ -5,7 +5,8 @@ export type Capability =
   | "write:project.transition"
   | "write:project.refresh"
   | "write:issue.transition"
-  | "write:run.mock";
+  | "write:run.mock"
+  | "write:run.cancel";
 
 export type Principal = {
   kind: "operator";
@@ -29,6 +30,7 @@ const ALL_CAPABILITIES: Capability[] = [
   "write:project.refresh",
   "write:issue.transition",
   "write:run.mock",
+  "write:run.cancel",
 ];
 
 function jsonResponse(body: unknown, init: ResponseInit = {}): Response {

@@ -350,3 +350,191 @@ export function renderDashboard(state: DashboardState): string {
 </body>
 </html>`;
 }
+
+// ---------------------------------------------------------------------------
+// Per-run detail view (Phase 5 PR-D)
+// ---------------------------------------------------------------------------
+
+export type RunDetailStepView = {
+  step_sequence: number;
+  step_name: string;
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | string;
+  started_at: string;
+  finished_at?: string | null;
+  error?: string | null;
+};
+
+export type RunDetailEventView = {
+  id: string;
+  event_type: string;
+  severity: string;
+  message?: string | null;
+  created_at: string;
+};
+
+export type RunDetailView = {
+  generated_at: string;
+  run: {
+    id: string;
+    issue_id: string;
+    issue_identifier?: string | null;
+    attempt: number;
+    status: string;
+    workflow_id?: string | null;
+    adapter_kind: string;
+    started_at: string;
+    finished_at?: string | null;
+    error?: string | null;
+    token_usage_json?: string | null;
+    artifact_manifest_ref?: string | null;
+    tenant_id: string;
+    slug: string;
+    external_id: string;
+  };
+  steps: RunDetailStepView[];
+  events: RunDetailEventView[];
+};
+
+function stepDurationMs(s: RunDetailStepView): number | null {
+  if (!s.finished_at) return null;
+  const startMs = new Date(s.started_at).getTime();
+  const finMs = new Date(s.finished_at).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(finMs)) return null;
+  return Math.max(0, finMs - startMs);
+}
+
+function formatDuration(ms: number | null): string {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${(ms / 60_000).toFixed(1)}m`;
+}
+
+function stepGrid(steps: RunDetailStepView[]): string {
+  // Always render exactly 16 cells. If a step is missing (failed mid-run),
+  // show as 'pending' so operators see the gap.
+  const byIndex = new Map<number, RunDetailStepView>();
+  for (const s of steps) byIndex.set(s.step_sequence, s);
+  const cells: string[] = [];
+  for (let i = 1; i <= 16; i++) {
+    const s = byIndex.get(i);
+    if (!s) {
+      cells.push(`
+        <li class="step step-pending">
+          <span class="seq">${i}</span>
+          <span class="name muted">pending</span>
+        </li>`);
+      continue;
+    }
+    const dur = formatDuration(stepDurationMs(s));
+    const errorAttr = s.error ? ` title="${escape(s.error)}"` : "";
+    cells.push(`
+      <li class="step step-${escape(s.status)}"${errorAttr}>
+        <span class="seq">${i}</span>
+        <span class="name"><code>${escape(s.step_name)}</code></span>
+        <span class="dur muted">${escape(dur)}</span>
+      </li>`);
+  }
+  return `<ul class="step-grid">${cells.join("")}</ul>`;
+}
+
+function eventsTable(events: RunDetailEventView[]): string {
+  if (events.length === 0) return `<p class="empty">No events recorded.</p>`;
+  const rows = events
+    .map((e) => `
+      <tr>
+        <td><code>${escape(e.id.slice(0, 24))}…</code></td>
+        <td><span class="status-${escape(e.severity)}">${escape(e.severity)}</span></td>
+        <td><code>${escape(e.event_type)}</code></td>
+        <td>${e.message ? escape(e.message) : `<span class="muted">—</span>`}</td>
+        <td><time>${escape(e.created_at)}</time></td>
+      </tr>`)
+    .join("");
+  return `
+    <table>
+      <thead>
+        <tr><th>id</th><th>severity</th><th>event</th><th>message</th><th>at</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+const RUN_DETAIL_CSS = `
+  ${DASHBOARD_CSS}
+  .step-grid { list-style: none; padding: 0; margin: 0.5rem 0; display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.4rem; }
+  .step { padding: 0.5rem; border-radius: 4px; border: 1px solid #e0e0e2; background: #fafafa; display: flex; flex-direction: column; gap: 0.15rem; min-height: 3.6rem; }
+  .step .seq { font-size: 0.7rem; color: #888; }
+  .step .name { font-size: 0.8rem; }
+  .step .dur { font-size: 0.7rem; }
+  .step-completed { background: #e8f6ec; border-color: #b9e2c5; }
+  .step-running { background: #fff7e0; border-color: #f3d27a; }
+  .step-failed { background: #fde9e9; border-color: #f1a4a4; }
+  .step-skipped { background: #f0f0f2; border-color: #d8d8da; color: #777; }
+  .step-pending { background: #fafafa; border-color: #e0e0e2; color: #888; }
+  .run-meta { display: grid; grid-template-columns: max-content 1fr; gap: 0.3rem 1rem; font-size: 0.85rem; }
+  .run-meta dt { font-weight: 600; color: #555; }
+  .run-meta dd { margin: 0; }
+`;
+
+export function renderRunDetail(state: RunDetailView): string {
+  const tu = safeParse<{ totalTokens?: number; inputTokens?: number; outputTokens?: number }>(
+    state.run.token_usage_json ?? null,
+  );
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Run ${escape(state.run.issue_identifier ?? state.run.external_id)} attempt ${escape(state.run.attempt)}</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>${RUN_DETAIL_CSS}</style>
+</head>
+<body>
+  <header>
+    <h1>Run ${escape(state.run.issue_identifier ?? state.run.external_id)} attempt ${escape(state.run.attempt)}</h1>
+    <span class="meta">
+      <a href="/dashboard">&larr; dashboard</a>
+      <span style="margin-left: 0.6rem">generated <time>${escape(state.generated_at)}</time></span>
+    </span>
+  </header>
+
+  <section>
+    <h2>Run</h2>
+    <dl class="run-meta">
+      <dt>Status</dt>
+      <dd><span class="status-${escape(state.run.status)}">${escape(state.run.status)}</span></dd>
+      <dt>Adapter</dt>
+      <dd><code>${escape(state.run.adapter_kind)}</code></dd>
+      <dt>Tenant / Profile</dt>
+      <dd><code>${escape(state.run.tenant_id)}</code> / <code>${escape(state.run.slug)}</code></dd>
+      <dt>Issue</dt>
+      <dd><code>${escape(state.run.issue_identifier ?? state.run.external_id)}</code></dd>
+      <dt>Workflow</dt>
+      <dd>${state.run.workflow_id ? `<code>${escape(state.run.workflow_id)}</code>` : `<span class="muted">—</span>`}</dd>
+      <dt>Started</dt>
+      <dd><time>${escape(state.run.started_at)}</time></dd>
+      <dt>Finished</dt>
+      <dd>${state.run.finished_at ? `<time>${escape(state.run.finished_at)}</time>` : `<span class="muted">in flight</span>`}</dd>
+      <dt>Tokens</dt>
+      <dd>${tu ? `total ${escape(tu.totalTokens ?? 0)} (in ${escape(tu.inputTokens ?? 0)} / out ${escape(tu.outputTokens ?? 0)})` : `<span class="muted">—</span>`}</dd>
+      <dt>Manifest</dt>
+      <dd>${state.run.artifact_manifest_ref ? `<code>${escape(state.run.artifact_manifest_ref)}</code>` : `<span class="muted">—</span>`}</dd>
+      ${state.run.error ? `<dt>Error</dt><dd class="warn"><code>${escape(state.run.error)}</code></dd>` : ""}
+    </dl>
+  </section>
+
+  <section>
+    <h2>Steps</h2>
+    ${stepGrid(state.steps)}
+  </section>
+
+  <section>
+    <h2>Events (${state.events.length})</h2>
+    ${eventsTable(state.events)}
+  </section>
+
+  <footer>
+    <span>Operator actions stay on the Bearer-protected API. Cancel: <code>POST /api/v1/runs/${escape(state.run.tenant_id)}/${escape(state.run.slug)}/${escape(state.run.external_id)}/${escape(state.run.attempt)}/actions/cancel</code> (Bearer + write:run.cancel).</span>
+  </footer>
+</body>
+</html>`;
+}

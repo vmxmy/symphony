@@ -20,7 +20,7 @@ import { IssueAgent } from "./agents/issue.js";
 import { ExecutionWorkflow } from "./workflows/execution.js";
 import type { ExecutionWorkflowParams } from "./workflows/execution.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
-import { renderDashboard } from "./dashboard/render.js";
+import { renderDashboard, renderRunDetail } from "./dashboard/render.js";
 import type { DashboardState, ProfileView, RetryView, TenantView } from "./dashboard/render.js";
 import {
   authenticateOperator,
@@ -319,6 +319,105 @@ export default {
       });
     }
 
+    // Per-run dashboard view (Phase 5 PR-D). Read-only — operator actions
+    // stay on the Bearer-protected /api/v1/runs/.../actions/cancel route.
+    const dashboardRun = url.pathname.match(
+      /^\/dashboard\/runs\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)$/,
+    );
+    if (dashboardRun) {
+      if (req.method !== "GET") return methodNotAllowed(["GET"]);
+      const session = await authenticateOperator(req, env.OPERATOR_TOKEN, {
+        allowCookie: true,
+        allowQuery: true,
+        jsonErrors: false,
+      });
+      if (!session.ok) return session.response;
+      const denied = requireCapability(session.principal, "read:dashboard");
+      if (denied) return denied;
+      if (session.principal.sessionSource === "query") {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: url.pathname,
+            "set-cookie": await sessionCookieHeader(env.OPERATOR_TOKEN!),
+          },
+        });
+      }
+      const [, tenantId, slug, externalId, attemptStr] = dashboardRun;
+      const attempt = Number(attemptStr);
+      if (!Number.isFinite(attempt)) {
+        return new Response("invalid attempt", { status: 400 });
+      }
+      const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
+      const [run, steps, events] = await Promise.all([
+        env.DB.prepare(
+          `SELECT r.id, r.issue_id, r.attempt, r.status, r.workflow_id, r.adapter_kind,
+                  r.started_at, r.finished_at, r.error, r.token_usage_json,
+                  r.artifact_manifest_ref,
+                  i.identifier AS issue_identifier
+             FROM runs r
+             LEFT JOIN issues i ON i.id = r.issue_id
+            WHERE r.id = ?`,
+        )
+          .bind(runId)
+          .first<Record<string, unknown>>(),
+        env.DB.prepare(
+          `SELECT step_sequence, step_name, status, started_at, finished_at, error
+             FROM run_steps WHERE run_id = ? ORDER BY step_sequence`,
+        )
+          .bind(runId)
+          .all<{
+            step_sequence: number;
+            step_name: string;
+            status: string;
+            started_at: string;
+            finished_at: string | null;
+            error: string | null;
+          }>(),
+        env.DB.prepare(
+          `SELECT id, event_type, severity, message, created_at
+             FROM run_events WHERE run_id = ? ORDER BY id ASC LIMIT 200`,
+        )
+          .bind(runId)
+          .all<{
+            id: string;
+            event_type: string;
+            severity: string;
+            message: string | null;
+            created_at: string;
+          }>(),
+      ]);
+      if (!run) {
+        return new Response(`run not found: ${runId}`, { status: 404 });
+      }
+      const html = renderRunDetail({
+        generated_at: new Date().toISOString(),
+        run: {
+          id: run.id as string,
+          issue_id: run.issue_id as string,
+          issue_identifier: (run.issue_identifier as string | null) ?? null,
+          attempt: run.attempt as number,
+          status: run.status as string,
+          workflow_id: (run.workflow_id as string | null) ?? null,
+          adapter_kind: run.adapter_kind as string,
+          started_at: run.started_at as string,
+          finished_at: (run.finished_at as string | null) ?? null,
+          error: (run.error as string | null) ?? null,
+          token_usage_json: (run.token_usage_json as string | null) ?? null,
+          artifact_manifest_ref: (run.artifact_manifest_ref as string | null) ?? null,
+          tenant_id: tenantId!,
+          slug: slug!,
+          external_id: externalId!,
+        },
+        steps: steps.results ?? [],
+        events: events.results ?? [],
+      });
+      return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
     if (url.pathname === "/logout") {
       return new Response(null, {
         status: 302,
@@ -472,7 +571,167 @@ export default {
         return jsonResponse({ run: result });
       }
 
-      // ---- run inspection -----------------------------------------------
+      // ---- per-run operator surface (Phase 5 PR-D) ---------------------
+      // Run IDs are constructed by ExecutionWorkflow as
+      // `run:{tenant}:{slug}:{external_id}:{attempt}`; the per-run routes
+      // accept the four positional parts so operators do not have to URL-
+      // encode the colon-delimited id.
+      const runState = url.pathname.match(
+        /^\/api\/v1\/runs\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/state$/,
+      );
+      if (runState) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId, attemptStr] = runState;
+        const attempt = Number(attemptStr);
+        if (!Number.isFinite(attempt)) {
+          return jsonResponse({ error: "invalid_attempt" }, { status: 400 });
+        }
+        const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
+        const [run, steps] = await Promise.all([
+          env.DB.prepare(
+            `SELECT id, issue_id, attempt, status, workflow_id, adapter_kind,
+                    started_at, finished_at, error, token_usage_json,
+                    artifact_manifest_ref
+               FROM runs WHERE id = ?`,
+          )
+            .bind(runId)
+            .first<Record<string, unknown>>(),
+          env.DB.prepare(
+            `SELECT step_sequence, step_name, status, started_at, finished_at, error
+               FROM run_steps WHERE run_id = ? ORDER BY step_sequence`,
+          )
+            .bind(runId)
+            .all<{
+              step_sequence: number;
+              step_name: string;
+              status: string;
+              started_at: string;
+              finished_at: string | null;
+              error: string | null;
+            }>(),
+        ]);
+        if (!run) {
+          return jsonResponse({ error: "run_not_found", run_id: runId }, { status: 404 });
+        }
+        return jsonResponse({
+          run: {
+            ...run,
+            token_usage: safeJsonParse<unknown>(run.token_usage_json as string | null, null),
+          },
+          steps: steps.results ?? [],
+        });
+      }
+
+      const runCancel = url.pathname.match(
+        /^\/api\/v1\/runs\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/actions\/cancel$/,
+      );
+      if (runCancel) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:run.cancel");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId, attemptStr] = runCancel;
+        const attempt = Number(attemptStr);
+        if (!Number.isFinite(attempt)) {
+          return jsonResponse({ error: "invalid_attempt" }, { status: 400 });
+        }
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+          assertControlPlaneId("issue", externalId!);
+        } catch (e) {
+          return jsonResponse(
+            { error: "invalid_id", message: String((e as Error).message) },
+            { status: 400 },
+          );
+        }
+        const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
+        const run = await env.DB.prepare(
+          `SELECT status, workflow_id FROM runs WHERE id = ?`,
+        )
+          .bind(runId)
+          .first<{ status: string; workflow_id: string | null }>();
+        if (!run) {
+          return jsonResponse({ error: "run_not_found", run_id: runId }, { status: 404 });
+        }
+        if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
+          return jsonResponse(
+            { error: "run_already_terminal", status: run.status },
+            { status: 409 },
+          );
+        }
+        // Best-effort terminate the workflow instance, then notify the
+        // IssueAgent. Phase 5 mock — terminate may be a no-op locally; the
+        // run row + IssueAgent state are the durable side of the cancel.
+        if (run.workflow_id) {
+          try {
+            const instance = await env.EXECUTION_WORKFLOW.get(run.workflow_id);
+            await instance.terminate();
+          } catch {
+            /* best-effort; D1 + DO writes below are durable */
+          }
+        }
+        const issueId = env.ISSUE_AGENT.idFromName(
+          durableObjectName("issue", tenantId!, slug!, externalId!),
+        );
+        const stub = env.ISSUE_AGENT.get(issueId) as unknown as {
+          onRunFinished: (
+            t: string,
+            s: string,
+            e: string,
+            outcome: "completed" | "failed" | "cancelled" | "retry",
+          ) => Promise<unknown>;
+        };
+        try {
+          await stub.onRunFinished(tenantId!, slug!, externalId!, "cancelled");
+        } catch {
+          /* swallow; the runs row update below is the source of truth */
+        }
+        const now = new Date().toISOString();
+        await env.DB.prepare(
+          `UPDATE runs SET status = 'cancelled', finished_at = ? WHERE id = ?`,
+        )
+          .bind(now, runId)
+          .run();
+        return jsonResponse({ run_id: runId, status: "cancelled" });
+      }
+
+      const runEvents = url.pathname.match(
+        /^\/api\/v1\/runs\/([^/]+)\/([^/]+)\/([^/]+)\/([^/]+)\/events$/,
+      );
+      if (runEvents) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId, attemptStr] = runEvents;
+        const attempt = Number(attemptStr);
+        if (!Number.isFinite(attempt)) {
+          return jsonResponse({ error: "invalid_attempt" }, { status: 400 });
+        }
+        const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
+        const after = url.searchParams.get("after");
+        const limitParam = Number(url.searchParams.get("limit") ?? "100");
+        const limit = Number.isFinite(limitParam) ? Math.min(Math.max(1, limitParam), 500) : 100;
+        const params: unknown[] = [runId];
+        let where = `WHERE run_id = ?`;
+        if (after) {
+          where += ` AND id > ?`;
+          params.push(after);
+        }
+        const { results } = await env.DB.prepare(
+          `SELECT id, event_type, severity, message, payload_ref, created_at
+             FROM run_events ${where}
+             ORDER BY id ASC LIMIT ?`,
+        )
+          .bind(...params, limit)
+          .all<Record<string, unknown>>();
+        const rows = results ?? [];
+        const nextCursor = rows.length === limit ? (rows[rows.length - 1]?.id ?? null) : null;
+        return jsonResponse({ data: rows, next_cursor: nextCursor });
+      }
+
+      // ---- run inspection (legacy single-id form) -----------------------
       const runDetail = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)$/);
       if (runDetail) {
         if (req.method !== "GET") return methodNotAllowed(["GET"]);
