@@ -34,6 +34,7 @@ import {
   writeManifest,
 } from "../runs/manifest.js";
 import { parseRuntimeConfig, pickWorkerHost } from "../runtime/factory.js";
+import { runHookWithTimeout } from "../runtime/hooks.js";
 import type {
   AssetBundleRef,
   WorkspaceHandle,
@@ -329,18 +330,40 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
 
       // Steps 5-7: Phase 5 mock no-ops. Each step records its boundary
       // event so dashboards see the canonical 16-step shape.
-      await recordStep(this.env, runId, 5, "afterCreateHook", step, async () => ({
-        result: { mock: true, skipped: true },
-        eventDetail: { mock: true, skipped: "no after_create hook in mock profile" },
-      }));
+      await recordStep(this.env, runId, 5, "afterCreateHook", step, async () => {
+        const result = await runHookWithTimeout(workerHost, workspaceHandle, "after_create", {});
+        return {
+          result: {
+            success: result.success,
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+          },
+          eventDetail: {
+            hook_name: "after_create",
+            success: result.success,
+            duration_ms: result.duration_ms,
+          },
+        };
+      });
       await recordStep(this.env, runId, 6, "renderPrompt", step, async () => ({
         result: { prompt: `${params.identifier} attempt ${params.attempt}` },
         eventDetail: { mock: true, prompt_chars: params.identifier.length + 20 },
       }));
-      await recordStep(this.env, runId, 7, "beforeRunHook", step, async () => ({
-        result: { mock: true, skipped: true },
-        eventDetail: { mock: true, skipped: "no before_run hook in mock profile" },
-      }));
+      await recordStep(this.env, runId, 7, "beforeRunHook", step, async () => {
+        const result = await runHookWithTimeout(workerHost, workspaceHandle, "before_run", {});
+        return {
+          result: {
+            success: result.success,
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+          },
+          eventDetail: {
+            hook_name: "before_run",
+            success: result.success,
+            duration_ms: result.duration_ms,
+          },
+        };
+      });
 
       // Step 8: runAgentTurnLoop — single mock turn.
       // CRITICAL: { retries: { limit: 0 } } per phase5-plan §9 R-1. Tool
@@ -466,10 +489,21 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
       });
 
       // Steps 12-15: mock no-ops emitting deterministic events.
-      await recordStep(this.env, runId, 12, "afterRunHook", step, async () => ({
-        result: { mock: true, skipped: true },
-        eventDetail: { mock: true, skipped: "no after_run hook in mock profile" },
-      }));
+      await recordStep(this.env, runId, 12, "afterRunHook", step, async () => {
+        const result = await runHookWithTimeout(workerHost, workspaceHandle, "after_run", {});
+        return {
+          result: {
+            success: result.success,
+            exit_code: result.exit_code,
+            duration_ms: result.duration_ms,
+          },
+          eventDetail: {
+            hook_name: "after_run",
+            success: result.success,
+            duration_ms: result.duration_ms,
+          },
+        };
+      });
       await recordStep(this.env, runId, 13, "validateCompletion", step, async () => ({
         result: { mock: true, valid: true },
         eventDetail: { mock: true, validation: "trivial-pass" },
