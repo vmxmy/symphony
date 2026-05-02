@@ -314,26 +314,28 @@ follows the same principle.
 
 ## 6. File-Level Checklist
 
-- [ ] `cf-control-plane/src/workflows/execution.ts` — new
-- [ ] `cf-control-plane/src/agents/mock_coding_adapter.ts` — new
-- [ ] `cf-control-plane/src/runs/manifest.ts` — new
-- [ ] `cf-control-plane/src/agents/issue.ts` — startRun + onRunFinished + `running`
-- [ ] `cf-control-plane/src/queues/types.ts` — `IssueDispatchMessage` v3 (start_run flag)
-- [ ] `cf-control-plane/src/queues/handlers.ts` — startRun call after dispatch
-- [ ] `cf-control-plane/src/auth/operator.ts` — `write:run.cancel` capability
-- [ ] `cf-control-plane/src/worker.ts` — 3 new run routes
-- [ ] `cf-control-plane/src/dashboard/render.ts` — per-run view + grid
-- [ ] `cf-control-plane/src/orchestration/mock_run.ts` — `@deprecated` marker
-- [ ] `cf-control-plane/wrangler.toml` — Workflows + R2 bindings, v3 migration tag
-- [ ] `cf-control-plane/migrations/0004_*.sql` — only if Workflows or R2 needs schema; current evidence says no
-- [ ] `cf-control-plane/tests/mock_coding_adapter.test.ts` — new
-- [ ] `cf-control-plane/tests/execution_workflow_steps.test.ts` — new
-- [ ] `cf-control-plane/tests/execution_workflow_e2e.test.ts` — new
-- [ ] `cf-control-plane/tests/lease_split_brain.test.ts` — new
-- [ ] `cf-control-plane/tests/cancel_mid_run.test.ts` — new
-- [ ] `cf-control-plane/README.md` — Phase 5 status + R2 bucket creation step
-- [ ] `docs/cloudflare-agent-native-target.md` §8.4 + §1133–1148 status sync
-- [ ] `docs/cloudflare-agent-native-phase5-plan.md` — this file
+- [x] `cf-control-plane/src/workflows/execution.ts` — PR-A scaffold (`01c26c1`); PR-C 16 step bodies + recordStep + final manifest re-write (`c0b8251`).
+- [x] `cf-control-plane/src/agents/mock_coding_adapter.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/src/runs/manifest.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/src/agents/issue.ts` — PR-B startRun + onRunFinished + running/completed states + workflow_instance_id lease (`bed787a`).
+- [x] `cf-control-plane/src/queues/types.ts` — no v3 needed; PR-B reuses v1/v2 message shapes.
+- [x] `cf-control-plane/src/queues/handlers.ts` — PR-B v1 path: dispatch then startRun (`bed787a`).
+- [x] `cf-control-plane/src/auth/operator.ts` — `write:run.cancel` capability added in PR-D (`15085be`).
+- [x] `cf-control-plane/src/worker.ts` — PR-A re-export + Env extension (`01c26c1`); PR-D state / cancel / events routes + dashboard run view route (`15085be`).
+- [x] `cf-control-plane/src/dashboard/render.ts` — PR-D `renderRunDetail` + 16-step grid + RunDetailView types (`15085be`).
+- [x] `cf-control-plane/src/orchestration/mock_run.ts` — PR-E `@deprecated` marker (this PR).
+- [x] `cf-control-plane/wrangler.toml` — PR-A `[[workflows]]` + `[[r2_buckets]]`. No new `[[migrations]]` block (Workflows register via the workflows binding).
+- [x] `cf-control-plane/migrations/0004_*.sql` — not needed in Phase 5 (no schema additions).
+- [x] `cf-control-plane/tests/mock_coding_adapter.test.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/tests/execution_workflow_steps.test.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/tests/execution_workflow_e2e.test.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/tests/lease_split_brain.test.ts` — PR-B (`bed787a`).
+- [x] `cf-control-plane/tests/cancel_mid_run.test.ts` — PR-C (`c0b8251`).
+- [x] `cf-control-plane/tests/dashboard_run_view.test.ts` — PR-D (`15085be`, beyond original plan).
+- [x] `cf-control-plane/tests/worker_routes_runs.test.ts` — PR-D (`15085be`, beyond original plan).
+- [x] `cf-control-plane/README.md` — Phase 5 status row + R2 + Workflows setup section (PR-A + PR-E).
+- [x] `docs/cloudflare-agent-native-target.md` §1140–1158 status sync (PR-E).
+- [x] `docs/cloudflare-agent-native-phase5-plan.md` — this file (PR-E).
 
 ## 7. Acceptance Criteria
 
@@ -516,6 +518,42 @@ start when:
   from R-2 above.
 - `target.md` §13.1 idempotency contract is updated to reflect step-
   vs-turn boundary decisions made in this phase.
+
+Status (2026-05-03, PR-E):
+
+- [x] All A1–A10 acceptance criteria pass on `main` via the in-memory
+  `FakeWorkflowRuntime` end-to-end test (`tests/execution_workflow_e2e.test.ts`).
+- [x] `MockCodingAgentAdapter` is the only shipped Phase 5 adapter;
+  `runs.adapter_kind` records `'mock'` for every Phase 5 run.
+- [ ] **Open follow-up**: live-edge run on the deployed Cloudflare control
+  plane has not yet executed the 16-step workflow against real Workflows
+  bindings. The local `FakeWorkflowRuntime` covers the canonical happy
+  path + cancel-mid-run; a one-shot live deploy + curl-driven dispatch is
+  the remaining smoke item. Tracked as the only gating Phase 6 prerequisite;
+  Phase 6 PR-A (VPS Docker WorkerHost) can start in parallel since
+  Phase 6's risk surface is the substrate, not the workflow shape.
+- [x] Dual retry layer documented in this plan (§9 R-1) and inherited
+  by `target.md` Phase 4 sub-cut 3 status sync (Cloudflare Queues retries
+  protect transient infra; `IssueAgent.markFailed` + alarm own
+  business-layer retries).
+- [x] step-vs-turn boundary documented inline in
+  `src/workflows/execution.ts` (`{ retries: { limit: 0 } }` on steps 2 / 8
+  / 16; default policy on the rest).
+
+Phase 5 follow-ups:
+
+- F-1 (carried into Phase 6): live-edge end-to-end run on the deployed
+  Worker. Smoke a real corpus issue through the dispatch queue and
+  verify the manifest lands in production R2.
+- F-2 (PR-D deferred): "latest run" summary column on the existing
+  Issues table. Requires a `LEFT JOIN runs` in `loadDashboardState`;
+  scope deferred from PR-D to keep the per-run surface focused.
+- F-3 (Phase 8 alongside ToolGatewayAgent): cookie-auth on operator
+  routes so the dashboard run view can host Cancel buttons. PR-D's
+  inline footer hint stays as the workaround until then.
+- F-4 (Phase 6 entry): replace the `MockCodingAgentAdapter` call in
+  step 8 with the WorkerHost-backed adapter; the workflow shape is
+  unchanged.
 
 ## 12. Out of Scope
 

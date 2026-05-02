@@ -48,6 +48,18 @@ Phase 4 (IssueAgent dispatch and retry/backoff):
 - [x] Failed issues stay visible as `issue_retries` rows with empty `due_at`; reconcile treats empty due dates as not due.
 - [x] Dashboard renders a read-only Retries section; operator retry/resume actions remain Bearer-only API calls for CLI/curl.
 
+Phase 5 (ExecutionWorkflow on Cloudflare Workflows with MockCodingAgentAdapter):
+
+- [x] ExecutionWorkflow class registered via `[[workflows]] EXECUTION_WORKFLOW`; R2 binding `ARTIFACTS = symphony-runs`.
+- [x] IssueAgent gains `running` + `completed` states + `workflow_instance_id` lease; `startRun` is idempotent against Promise.all races via in-flight Promise dedup.
+- [x] Queue dispatch chain: `IssueDispatchMessage` → `IssueAgent.dispatch` → `IssueAgent.startRun` → `EXECUTION_WORKFLOW.create`.
+- [x] 16 canonical steps from target.md §8.4 implemented. Step 2 / 8 / 16 use `retries.limit=0` (lease check / mutating tool calls / lease release are not replay-safe).
+- [x] `MockCodingAgentAdapter` ships as the only Phase 5 adapter; ts-engine mock parity preserved.
+- [x] R2 manifest written at the canonical step-11 boundary and re-emitted with the final 16-step terminal snapshot before `runs.status=completed`.
+- [x] Per-run operator surface: `/api/v1/runs/:t/:s/:e/:attempt/{state,events}` (read), `actions/cancel` (write:run.cancel).
+- [x] Dashboard `/dashboard/runs/:t/:s/:e/:attempt` renders the 16-step grid + run metadata + events.
+- [x] `executeMockRun` marked `@deprecated`; the synchronous admin route stays for fast-feedback bring-up; Phase 6 removes both.
+
 ## Layout
 
 ```
