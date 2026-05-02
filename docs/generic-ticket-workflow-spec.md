@@ -1002,6 +1002,42 @@ CREATE TABLE agent_sessions (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE tool_definitions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  input_schema_json TEXT NOT NULL,
+  output_schema_json TEXT NOT NULL,
+  risk_level TEXT NOT NULL,
+  requires_approval INTEGER NOT NULL DEFAULT 0,
+  idempotency_required INTEGER NOT NULL DEFAULT 0,
+  handler TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  archived_at TEXT,
+  UNIQUE (tenant_id, name)
+);
+
+CREATE TABLE tool_invocations (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  ticket_id TEXT NOT NULL,
+  workflow_instance_id TEXT,
+  workflow_step_id TEXT,
+  agent_session_id TEXT,
+  tool_name TEXT NOT NULL,
+  status TEXT NOT NULL,
+  risk_level TEXT NOT NULL,
+  input_ref TEXT NOT NULL,
+  output_ref TEXT,
+  approval_id TEXT,
+  idempotency_key TEXT,
+  started_at TEXT NOT NULL,
+  completed_at TEXT
+);
+
 CREATE TABLE artifacts (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -1068,6 +1104,22 @@ CREATE INDEX idx_workflow_steps_instance_seq
 CREATE INDEX idx_agent_sessions_ticket
   ON agent_sessions(ticket_id, status);
 
+CREATE INDEX idx_tool_definitions_tenant_active
+  ON tool_definitions(tenant_id, status) WHERE archived_at IS NULL;
+
+CREATE INDEX idx_tool_invocations_ticket
+  ON tool_invocations(ticket_id, started_at);
+
+CREATE INDEX idx_tool_invocations_step
+  ON tool_invocations(workflow_step_id, started_at)
+  WHERE workflow_step_id IS NOT NULL;
+
+CREATE INDEX idx_tool_invocations_status
+  ON tool_invocations(tenant_id, status, started_at);
+
+CREATE INDEX idx_tool_invocations_idempotency
+  ON tool_invocations(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
 CREATE INDEX idx_artifacts_ticket
   ON artifacts(ticket_id, created_at);
 
@@ -1076,6 +1128,27 @@ CREATE INDEX idx_audit_events_ticket_time
 
 CREATE INDEX idx_notifications_pending
   ON notifications(status, created_at);
+```
+
+### 11.2.1 Existing Approval Table Extensions
+
+The existing `approvals` table remains the reusable approval surface during
+migration. Implementations SHOULD extend it additively for generic workflow
+references instead of replacing it in G1:
+
+```sql
+ALTER TABLE approvals ADD COLUMN ticket_id TEXT;
+ALTER TABLE approvals ADD COLUMN workflow_instance_id TEXT;
+ALTER TABLE approvals ADD COLUMN workflow_step_id TEXT;
+ALTER TABLE approvals ADD COLUMN approver_group TEXT;
+ALTER TABLE approvals ADD COLUMN expires_at TEXT;
+
+CREATE INDEX idx_approvals_ticket_status
+  ON approvals(ticket_id, status) WHERE ticket_id IS NOT NULL;
+
+CREATE INDEX idx_approvals_workflow_step
+  ON approvals(workflow_instance_id, workflow_step_id)
+  WHERE workflow_instance_id IS NOT NULL;
 ```
 
 ### 11.3 Existing Table Reinterpretation
