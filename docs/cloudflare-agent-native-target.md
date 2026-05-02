@@ -1165,10 +1165,27 @@ Status sync (2026-05-03, Phase 5 PR-E):
 - Operator surface: `/api/v1/runs/:t/:s/:e/:attempt/{state,events}` (read), `actions/cancel` (write:run.cancel). Dashboard run view at `/dashboard/runs/:t/:s/:e/:attempt`.
 - `executeMockRun` marked `@deprecated`; the synchronous admin route stays alive for Phase 5 bring-up; Phase 6 removes both.
 
-Status sync (2026-05-03, Phase 6 PR-A):
+Status sync (2026-05-03, Phase 6 PR-A through PR-E-1):
 
-- `WorkerHost` contract (`src/runtime/worker_host.ts`) and `MockWorkerHost` (`src/runtime/mock_worker_host.ts`) land Phase 6 F-5 + F-6. ADR-0001 dispatch isolation enforced by grep gate (`scripts/check-phase6-invariants.ts`). Canonical 16-step names locked in the same gate.
-- Phase 6 PR-A commit: TBD-PR-A
+- **PR-A** `289f255` — `WorkerHost` contract + `MockWorkerHost` + F-5 lease ordering + F-6 manifest finalize + grep invariants gate.
+- **PR-B** `ecbba33` — `VpsDockerHost` HTTP adapter (authenticated calls to symphony-vps-bridge; bridge endpoints documented).
+- **PR-C-1** `2bcdfe6` — Runtime factory (`pickWorkerHost` + defensive `parseRuntimeConfig`).
+- **PR-C-2** `277d09d` — `execution.ts` steps 3+4 swap to real `WorkerHost.prepareWorkspace` + `materializeAssets` via factory dispatch.
+- **PR-D-1** `5628f41` — `runHookWithTimeout` helper with per-name default timeouts (60s/30s/60s/30s).
+- **PR-D-2** `f27fb59` — `execution.ts` steps 5/7/12 swap to `runHookWithTimeout` for after_create/before_run/after_run.
+- **PR-D-3** `0ea41b2` — `execution.ts` step 15 archive sequence (before_remove hook + snapshot with `DEFAULT_REDACT_LIST` + release).
+- **PR-E-1** `777cfad` — `GET /api/v1/profiles/:t/:s/runtime` operator route (resolved RuntimeConfig via factory).
+- **Docs** `01cf9e4` — phase6-plan §6 checklist + §6.1 merge log + cf-control-plane README sync.
+- ADR-0001 dispatch isolation enforced by grep gate (`scripts/check-phase6-invariants.ts`). Canonical 16-step names locked in the same gate.
+- Test baseline: 132 pass / 0 fail / 478 expects on `main`.
+
+Phase 6 deferred (next slice — PR-E-2 onwards):
+
+- `CloudflareContainerHost` substrate adapter + `[[containers]]` wrangler binding.
+- Admin write routes (`POST /api/v1/projects/:t/:s/actions/snapshot-now`, `POST /api/v1/runs/:t/:s/:e/:attempt/actions/peek-workspace`).
+- Dashboard render: substrate identity + snapshot link + hook output excerpt.
+- `tests/phase6a_e2e.test.ts` against a fake VPS bridge harness.
+- `tests/worker_host_redaction.test.ts` against a fake snapshot fixture.
 
 ### Phase 6: Workspace execution on WorkerHosts
 
