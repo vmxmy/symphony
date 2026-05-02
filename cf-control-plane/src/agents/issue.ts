@@ -17,9 +17,9 @@
 // wait until Phase 5 when we have run lifecycle to mirror. Dashboard
 // reads agent state per-issue via a Worker route that calls getStatus.
 //
-// Phase 4 next sub-cut will add: dispatch queue consumer that calls
-// dispatch() on cron-decisioned candidates, retry_wait + failed states,
-// and the run lease (workflow_instance_id) once ExecutionWorkflow lands.
+// Phase 4 sub-cut 3 PR-A adds only the retry_wait + failed state machine
+// surface. The alarm handler, markFailed/retryNow entrypoints, and any run
+// lease (workflow_instance_id) remain out of scope until PR-C / Phase 5.
 
 import { DurableObject } from "cloudflare:workers";
 import { assertControlPlaneId } from "../identity.js";
@@ -28,7 +28,9 @@ export type IssueAgentStatus =
   | "discovered"
   | "queued"
   | "paused"
-  | "cancelled";
+  | "cancelled"
+  | "retry_wait"
+  | "failed";
 
 export type IssueAgentState = {
   issueKey: string; // `${tenantId}:${slug}:${externalId}`
@@ -41,6 +43,11 @@ export type IssueAgentState = {
   decidedBy?: string;
   /** Number of times this issue has been dispatched (incremented on each transition into `queued`). */
   dispatchCount: number;
+  /** Business-layer retry attempt. PR-A preserves it; PR-C markFailed will increment it. */
+  attempt: number;
+  lastError?: string;
+  /** ISO timestamp when the next business-layer retry becomes due. */
+  nextRetryAt?: string;
 };
 
 type Env = {
@@ -49,9 +56,12 @@ type Env = {
 
 const ALLOWED_TRANSITIONS: Record<IssueAgentStatus, IssueAgentStatus[]> = {
   discovered: ["queued", "cancelled"],
-  queued: ["paused", "cancelled"],
+  queued: ["paused", "cancelled", "retry_wait", "failed"],
   paused: ["queued", "cancelled"],
   cancelled: [], // terminal
+  // Phase 4 sub-cut 3 PR-A: table-only extension; alarm re-dispatch lands in PR-C.
+  retry_wait: ["queued", "paused", "cancelled"],
+  failed: ["queued", "cancelled"],
 };
 
 export class IssueAgent extends DurableObject<Env> {
@@ -61,7 +71,7 @@ export class IssueAgent extends DurableObject<Env> {
     externalId: string,
   ): Promise<IssueAgentState> {
     const cached = await this.ctx.storage.get<IssueAgentState>("state");
-    if (cached) return cached;
+    if (cached) return { ...cached, attempt: cached.attempt ?? 0 };
     const state: IssueAgentState = {
       issueKey: `${tenantId}:${slug}:${externalId}`,
       tenantId,
@@ -70,6 +80,7 @@ export class IssueAgent extends DurableObject<Env> {
       status: "discovered",
       updatedAt: new Date().toISOString(),
       dispatchCount: 0,
+      attempt: 0,
     };
     await this.ctx.storage.put("state", state);
     return state;
