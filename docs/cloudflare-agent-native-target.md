@@ -1,8 +1,39 @@
 # Cloudflare Agent Native Target Architecture
 
-Status: Target document / planning artifact  
-Date: 2026-05-01  
-Scope: Migrate the current TypeScript-only Symphony architecture toward a Cloudflare Agent native architecture. This document defines the target and migration phases; it does not implement code.
+Status: Target document / planning artifact
+Date: 2026-05-01
+Scope: Migrate the current TypeScript-only Symphony architecture toward a
+Cloudflare Agent native architecture. This document defines the target and
+migration phases; it does not implement code.
+
+## Architecture Positioning
+
+This document is now subordinate to the generic ticket workflow product target
+defined in `docs/generic-ticket-workflow-spec.md` and accepted in
+`docs/adr/0003-generic-ticket-workflow-core.md`.
+
+Use this document for Cloudflare deployment architecture: Workers, Workflows,
+Durable Objects/Agents, D1, R2, Queues, WorkerHosts, and operational phases.
+Use the generic ticket workflow spec for product/runtime semantics:
+
+```text
+Ticket
+  -> WorkflowInstance
+  -> WorkflowStep
+  -> AgentRole / ToolInvocation / Approval / Artifact / AuditEvent
+```
+
+The earlier Cloudflare-native model names such as `IssueAgent`,
+`ExecutionWorkflow`, `TrackerAdapter`, and `WorkerHost` should be interpreted as
+compatibility or infrastructure terms:
+
+- `IssueAgent` maps to ticket/workflow ownership for the coding compatibility
+  path; new generic work should use ticket/workflow vocabulary.
+- `Linear` is a connector/source/channel, not canonical workflow state.
+- `Codex`, local workspaces, and WorkerHosts implement the
+  `coding_agent_run` adapter, not the generic workflow core.
+- Approval, artifacts, and audit records are first-class platform state, not
+  comments or tracker-only side effects.
 
 ## 1. Executive Summary
 

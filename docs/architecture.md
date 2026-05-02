@@ -1,6 +1,12 @@
 # Architecture: Three Entities
 
-Symphony is organized around three separated entities. Each has a defined contract and avoids knowing the others' internals.
+Symphony is organized around three separated entities. Each has a defined
+contract and avoids knowing the others' internals.
+
+This page describes the current TypeScript/Codex compatibility runtime. The
+vNext product architecture is the generic ticket workflow platform described in
+`docs/generic-ticket-workflow-spec.md`. In that target, this current architecture
+is one coding workflow adapter path rather than the product core.
 
 ## Dependency Direction
 
@@ -8,7 +14,10 @@ Symphony is organized around three separated entities. Each has a defined contra
 PROFILE (workflow bundle) -> LAUNCHER (bridge) -> SYMPHONY TS ENGINE -> CODEX
 ```
 
-Profiles define what to do. The launcher validates and starts profile-specific engine processes. The TypeScript engine runs tracker polling, workspace lifecycle, Codex JSON-RPC sessions, retry/reconciliation, logging, and the dashboard API.
+Profiles define what to do. The launcher validates and starts profile-specific
+engine processes. The TypeScript engine runs tracker polling, workspace
+lifecycle, Codex JSON-RPC sessions, retry/reconciliation, logging, and the
+dashboard API.
 
 ## 1. Symphony TS Engine
 
@@ -26,11 +35,14 @@ Long-running orchestration daemon.
 - `ts-engine/src/main.ts` — Bun runtime entry
 - `ts-engine/package.json` — `typecheck`, `test`, and `build` scripts
 
-**It does not know**: profile registry details, where the launcher found the profile, or how credentials are provisioned beyond process env and `WORKFLOW.md`.
+**It does not know**: profile registry details, where the launcher found the
+profile, or how credentials are provisioned beyond process env and
+`WORKFLOW.md`.
 
 ## 2. Profile · the Workflow Bundle
 
-A self-contained pipeline. It defines state machine, prompt body, tracker project, credentials, skills, and Codex environment.
+A self-contained pipeline. It defines state machine, prompt body, tracker
+project, credentials, skills, and Codex environment.
 
 **Lives in**: `profiles/<name>/`.
 
