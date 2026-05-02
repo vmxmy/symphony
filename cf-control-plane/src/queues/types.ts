@@ -32,19 +32,34 @@ export type TrackerRefreshMessage = {
  * not start runs from this signal yet — Phase 5 ExecutionWorkflow picks
  * up from `queued`.
  */
-export type IssueDispatchMessage = {
-  kind: "issue.dispatch";
-  version: 1;
-  tenant_id: string;
-  slug: string;
-  /** Tracker-side stable id (Linear UUID for linear, native id for cloudflare). */
-  external_id: string;
-  /** Human-readable issue identifier (e.g. SYM-42), echoed for logging. */
-  identifier: string;
-  /** reconcile-decided attempt counter (1-indexed). */
-  attempt: number;
-  /** ISO timestamp at which the producing poll fired. */
-  scheduled_at: string;
-};
+export type IssueDispatchMessage =
+  | {
+      kind: "issue.dispatch";
+      version: 1;
+      tenant_id: string;
+      slug: string;
+      /** Tracker-side stable id (Linear UUID for linear, native id for cloudflare). */
+      external_id: string;
+      /** Human-readable issue identifier (e.g. SYM-42), echoed for logging. */
+      identifier: string;
+      /** reconcile-decided attempt counter (1-indexed). */
+      attempt: number;
+      /** ISO timestamp at which the producing poll fired. */
+      scheduled_at: string;
+    }
+  | {
+      kind: "issue.dispatch";
+      version: 2;
+      tenant_id: string;
+      slug: string;
+      external_id: string;
+      identifier: string;
+      attempt: number;
+      scheduled_at: string;
+      /** Phase 4 PR-C test seam: when true, route through IssueAgent.markFailed instead of dispatch. Removed in Phase 5 once ExecutionWorkflow reports real failure outcomes. */
+      inject_failure: true;
+      /** Synthetic error string passed to markFailed. */
+      error?: string;
+    };
 
 export type SymphonyQueueMessage = TrackerRefreshMessage | IssueDispatchMessage;

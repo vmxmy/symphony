@@ -90,11 +90,17 @@ export async function handleTrackerRefresh(
 }
 
 /**
- * Handle one issue.dispatch message: route through IssueAgent.dispatch,
- * which transitions the agent into `queued`. Phase 4 invariant: this
- * does NOT start a run; the queued state is durable but no consumer
- * acts on it yet. Phase 5 ExecutionWorkflow + IssueAgent.startRun will
- * pick up from here.
+ * Handle one issue.dispatch message.
+ *
+ * The default v1 path routes through IssueAgent.dispatch, which transitions
+ * the agent into `queued`. Phase 4 invariant: this does NOT start a run; the
+ * queued state is durable but no consumer acts on it yet. Phase 5
+ * ExecutionWorkflow + IssueAgent.startRun will pick up from here.
+ *
+ * Retry layers are deliberately split: Cloudflare Queue retries protect this
+ * handler when the DO call itself fails, while IssueAgent.markFailed bumps the
+ * business-layer attempt only when a dispatched issue outcome is failed. The
+ * v2 inject_failure branch is the Phase 4 test seam for that future outcome.
  */
 export async function handleIssueDispatch(
   env: Env,
@@ -109,13 +115,21 @@ export async function handleIssueDispatch(
     durableObjectName("issue", message.tenant_id, message.slug, message.external_id),
   );
   const stub = env.ISSUE_AGENT.get(id);
-  const state = await stub.dispatch(
-    message.tenant_id,
-    message.slug,
-    message.external_id,
-    "scheduled-poll",
-    `attempt=${message.attempt}`,
-  );
+  const state =
+    message.version === 2 && message.inject_failure === true ?
+      await stub.markFailed(
+        message.tenant_id,
+        message.slug,
+        message.external_id,
+        message.error ?? "inject_failure (test seam)",
+      )
+    : await stub.dispatch(
+        message.tenant_id,
+        message.slug,
+        message.external_id,
+        "scheduled-poll",
+        `attempt=${message.attempt}`,
+      );
 
   return {
     external_id: message.external_id,
