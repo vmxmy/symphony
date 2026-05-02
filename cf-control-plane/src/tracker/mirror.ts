@@ -24,6 +24,8 @@
 // what changed.
 
 import type { Issue } from "../types.js";
+import { createOrGetTicketFromSource } from "../tickets/store.js";
+import type { TicketPriority } from "../tickets/types.js";
 
 type MirrorStats = {
   inserted: number;
@@ -98,6 +100,7 @@ export async function mirrorIssues(
           now,
         )
         .run();
+      await mirrorIssueTicketSource(db, profileId, tenantId, issue, now);
       stats.inserted++;
       continue;
     }
@@ -133,6 +136,7 @@ export async function mirrorIssues(
           existing.id,
         )
         .run();
+      await mirrorIssueTicketSource(db, profileId, tenantId, issue, now);
       stats.updated++;
     } else {
       // Identical snapshot: only bump last_seen_at; do NOT touch
@@ -146,9 +150,52 @@ export async function mirrorIssues(
         .prepare(`UPDATE issues SET last_seen_at = ? WHERE id = ?`)
         .bind(now, existing.id)
         .run();
+      await mirrorIssueTicketSource(db, profileId, tenantId, issue, now);
       stats.unchanged++;
     }
   }
 
   return stats;
+}
+
+async function mirrorIssueTicketSource(
+  db: D1Database,
+  profileId: string,
+  tenantId: string,
+  issue: Issue,
+  now: string,
+): Promise<void> {
+  await createOrGetTicketFromSource(db, {
+    tenantId,
+    sourceKind: "linear",
+    externalId: issue.id,
+    externalKey: issue.identifier,
+    externalUrl: issue.url,
+    now,
+    ticket: {
+      tenantId,
+      key: ticketKeyFromIssue(profileId, issue),
+      type: "linear_issue",
+      title: issue.title ?? issue.identifier,
+      description: issue.description,
+      priority: priorityFromIssue(issue.priority),
+      workflowKey: "linear-issue",
+      inputJson: JSON.stringify({
+        source: { kind: "linear", profileId },
+        issue,
+      }),
+      tagsJson: JSON.stringify(issue.labels),
+    },
+  });
+}
+
+function priorityFromIssue(priority: number | null): TicketPriority {
+  if (priority === 1) return "urgent";
+  if (priority === 2) return "high";
+  if (priority === 4) return "low";
+  return "normal";
+}
+
+function ticketKeyFromIssue(profileId: string, issue: Issue): string {
+  return `linear:${profileId}:${issue.id}`;
 }
