@@ -293,6 +293,32 @@ describe("IssueAgent retry loop entrypoints", () => {
     expect(readState()?.status).toBe("cancelled");
   });
 
+  test("cancel clears retry mirror row", async () => {
+    const { agent, db } = makeAgent(
+      makeState("retry_wait", {
+        attempt: 1,
+        nextRetryAt: new Date(Date.now() + 1_000).toISOString(),
+      }),
+    );
+    db.query(`
+      INSERT INTO issue_retries (
+        issue_id, tenant_id, profile_id, external_id, attempt, due_at, last_error, updated_at
+      ) VALUES (?, ?, ?, ?, 1, ?, 'boom', ?)
+    `).run(
+      `${IDS.tenantId}/${IDS.slug}:${IDS.externalId}`,
+      IDS.tenantId,
+      `${IDS.tenantId}/${IDS.slug}`,
+      IDS.externalId,
+      new Date(Date.now() + 1_000).toISOString(),
+      new Date().toISOString(),
+    );
+
+    const state = await agent.cancel(IDS.tenantId, IDS.slug, IDS.externalId, "operator", "operator-cancel");
+
+    expect(state.status).toBe("cancelled");
+    expect(retryRows(db)).toHaveLength(0);
+  });
+
   test("alarm in retry_wait enqueues issue.dispatch and transitions to queued", async () => {
     const { agent, readState, sentMessages, db } = makeAgent(
       makeState("retry_wait", {

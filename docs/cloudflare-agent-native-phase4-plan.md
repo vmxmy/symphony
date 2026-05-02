@@ -86,14 +86,16 @@ R4. Alarm: when entering `retry_wait`, IssueAgent calls
   `IssueAgent.dispatch` does today.
 
 R5. Reconcile harness MUST NOT emit a `dispatch` decision for issues whose
-retry due_at is still in the future. Sub-cut 3 must therefore mirror retry
-state to a queryable surface that `reconcileTick` can read; doing it via
-per-issue DO subrequest fan-out is too expensive — mirror to D1 instead.
+retry due_at is still in the future, or whose due_at is empty/null because
+the row represents failed-state visibility. Sub-cut 3 must therefore mirror
+retry state to a queryable surface that `reconcileTick` can read; doing it
+via per-issue DO subrequest fan-out is too expensive — mirror to D1 instead.
 
 R6. `D1` migration v3 MUST add the retry mirror without breaking sub-cut 2's
-schema. New table `issue_retries` (one row per issue when retrying;
-DELETEd on dispatch success). NO `ALTER TABLE issues` — preserve the
-"defer agent_state on D1.issues until Phase 5" boundary.
+schema. New table `issue_retries` (one row per issue when retrying or failed;
+failed rows use `due_at = ""`; rows are DELETEd when an operator/scheduler
+transitions the issue back to queued). NO `ALTER TABLE issues` — preserve
+the "defer agent_state on D1.issues until Phase 5" boundary.
 
 R7. Operator routes:
 - `POST /api/v1/issues/:t/:s/:e/actions/retry-now` — force a `retry_wait` to
@@ -104,9 +106,9 @@ R7. Operator routes:
   `write:issue.transition` capability). Phase 5 removes this when
   ExecutionWorkflow reports real failure outcomes.
 
-R8. Dashboard MUST render the new statuses in the issue view and show
-`attempt`, `last_error`, and a relative `next_retry_at` countdown for
-`retry_wait` rows.
+R8. Dashboard MUST render a read-only retry/failed section showing `attempt`,
+`last_error`, and a relative `next_retry_at` countdown for `retry_wait` rows.
+It MUST NOT add dashboard mutation buttons in PR-D.
 
 R9. Phase 4 invariant preserved:
 - No ExecutionWorkflow.
@@ -174,9 +176,11 @@ CREATE INDEX idx_issue_retries_due ON issue_retries (due_at);
 CREATE INDEX idx_issue_retries_profile ON issue_retries (profile_id);
 ```
 
-`IssueAgent.markFailed` writes the row via `env.DB`; `IssueAgent.dispatch`
-DELETEs by `issue_id` whenever it transitions out of retry_wait. The alarm
-re-dispatch path also DELETEs (because it transitions to queued).
+`IssueAgent.markFailed` writes the row via `env.DB`; retry_wait rows carry a
+real `due_at`, while failed rows are retained with `due_at = ""` for dashboard
+visibility. `IssueAgent.dispatch`, `retryNow`, `resume`, `pause`, `cancel`,
+and the alarm re-dispatch path DELETE by `issue_id` when leaving the visible
+retry/failed state.
 
 ### Step 5 — Reconcile harness retry-due gate
 
@@ -185,7 +189,8 @@ re-dispatch path also DELETEs (because it transitions to queued).
 - Caller (project agent's `poll`) currently constructs that array empty;
   update to `SELECT issue_id, attempt, due_at FROM issue_retries WHERE
   profile_id = ?` and pass.
-- Existing `tick.ts:110-113` math (`prev + 1`) stays correct.
+- Existing `tick.ts:110-113` math (`prev + 1`) stays correct; PR-D adds the
+  guard that empty/null `due_at` rows are not due.
 
 ### Step 6 — Failure routing in queue handler (test seam)
 
@@ -210,10 +215,9 @@ re-dispatch path also DELETEs (because it transitions to queued).
 ### Step 8 — Dashboard surface
 
 `cf-control-plane/src/dashboard/render.ts`:
-- New state-cell rendering for `retry_wait` (countdown to `next_retry_at`)
-  and `failed` (showing `last_error` + Resume CTA pointing at the existing
-  resume admin route).
-- IssueView fetches retry mirror via the same D1 table; no per-DO fan-out.
+- New read-only Retries section for `retry_wait` (countdown to
+  `next_retry_at`) and `failed` (showing `last_error` with no buttons).
+- Dashboard fetches retry mirror rows via the same D1 table; no per-DO fan-out.
 
 ### Step 9 — Tests
 
@@ -310,12 +314,13 @@ the `dispatch` decision is **not** emitted; when due_at <= now, decision
 fires with `attempt = prev + 1`. Empty/null `due_at` values represent
 failed informational rows and also suppress dispatch.
 
-A8. Cancellation race: alarm fires while issue is `cancelled` → no enqueue,
-no transition; `issue_retries` row removed defensively.
+A8. Cancellation race: operator cancel clears the `issue_retries` row; if a
+previously scheduled alarm still fires while issue is `cancelled`, it no-ops
+with no enqueue and no transition.
 
-A9. Phase 4 invariant audit: no new code references `runs`, `run_steps`,
-`run_events`, `workflow_instance_id`, or `agent_state` on `D1.issues`.
-Add a grep gate to `bun test` to enforce this.
+A9. Phase 4 invariant audit: sub-cut 3 does not add ExecutionWorkflow,
+`workflow_instance_id`, or an `agent_state` column on `D1.issues`; existing
+mock-run/dashboard run views remain unchanged until Phase 5.
 
 A10. `bun test` green; `bunx tsc --noEmit` clean; `bun run db:migrate:local` applies.
 
@@ -329,7 +334,7 @@ A10. `bun test` green; `bunx tsc --noEmit` clean; `bun run db:migrate:local` app
 | Retry due gate | `tests/reconcile_retry_gate.test.ts` | Decision absent when due_at is future or empty |
 | Operator routes | bun test + manual CLI/curl | Status response shows expected state |
 | Dashboard render | manual screenshot of `/dashboard` | retry_wait countdown and failed informational rows visible |
-| Phase 4 invariant | grep gate in test runner | No banned tokens |
+| Phase 4 invariant | code review / targeted `rg` | No ExecutionWorkflow, `workflow_instance_id`, or `D1.issues.agent_state` added |
 | Live e2e (optional) | Deploy + admin/inject-failure | DispatchMessage observed within backoff window |
 
 ## 9. Risks and Mitigations

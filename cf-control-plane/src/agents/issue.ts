@@ -315,7 +315,9 @@ export class IssueAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<IssueAgentState> {
-    return this.transition(tenantId, slug, externalId, "paused", decidedBy, reason);
+    const state = await this.transition(tenantId, slug, externalId, "paused", decidedBy, reason);
+    await this.deleteRetryMirror(tenantId, slug, externalId);
+    return state;
   }
 
   async resume(
@@ -337,6 +339,8 @@ export class IssueAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<IssueAgentState> {
-    return this.transition(tenantId, slug, externalId, "cancelled", decidedBy, reason);
+    const state = await this.transition(tenantId, slug, externalId, "cancelled", decidedBy, reason);
+    await this.deleteRetryMirror(tenantId, slug, externalId);
+    return state;
   }
 }
