@@ -37,6 +37,7 @@ import { parseRuntimeConfig, pickWorkerHost } from "../runtime/factory.js";
 import { runHookWithTimeout } from "../runtime/hooks.js";
 import type {
   AssetBundleRef,
+  R2ObjectRef,
   WorkspaceHandle,
   WorkspaceRef,
 } from "../runtime/worker_host.js";
@@ -71,6 +72,15 @@ const DEFAULT_RETRIES: StepRetries = {
 };
 
 const NO_RETRY: StepRetries = { limit: 0, delay: 0 };
+
+const DEFAULT_REDACT_LIST: readonly string[] = [
+  ".env",
+  "**/.git/",
+  "**/secret*",
+  "**/*.key",
+  "**/auth*.json",
+  "runtime/log/",
+];
 
 type StepBody<T> = () => Promise<{ result: T; eventDetail?: Record<string, unknown> }>;
 
@@ -512,10 +522,56 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
         result: { mock: true, transitioned: false },
         eventDetail: { mock: true, note: "phase 5 emits event only; tracker write-back is phase 8" },
       }));
-      await recordStep(this.env, runId, 15, "archiveOrCleanupWorkspace", step, async () => ({
-        result: { mock: true, skipped: true },
-        eventDetail: { mock: true, skipped: "phase 5 mock has no workspace to archive" },
-      }));
+      await recordStep(this.env, runId, 15, "archiveOrCleanupWorkspace", step, async () => {
+        // 1. before_remove hook (with timeout)
+        const hookResult = await runHookWithTimeout(
+          workerHost,
+          workspaceHandle,
+          "before_remove",
+          {},
+        );
+
+        // 2. snapshot — soft-error: failure emits a warning event but doesn't fail the step
+        let snapshotRef: R2ObjectRef | null = null;
+        let snapshotError: string | null = null;
+        try {
+          snapshotRef = await workerHost.snapshotWorkspace(workspaceHandle, {
+            redact: [...DEFAULT_REDACT_LIST],
+          });
+        } catch (e) {
+          snapshotError = String((e as Error)?.message ?? e);
+          const now = new Date().toISOString();
+          await this.env.DB.prepare(
+            `INSERT OR IGNORE INTO run_events (id, run_id, event_type, severity, message, created_at)
+             VALUES (?, ?, ?, 'warning', ?, ?)`,
+          )
+            .bind(
+              `${runId}:15:snapshot_failed`,
+              runId,
+              "step.archiveOrCleanupWorkspace.snapshot_failed",
+              snapshotError,
+              now,
+            )
+            .run();
+        }
+
+        // 3. release workspace (idempotent on both Mock and VPS adapters)
+        await workerHost.releaseWorkspace(workspaceHandle);
+
+        return {
+          result: {
+            hook_success: hookResult.success,
+            snapshot_ref: snapshotRef,
+            snapshot_error: snapshotError,
+            released: true,
+          },
+          eventDetail: {
+            hook_success: hookResult.success,
+            snapshot_key: snapshotRef?.key ?? null,
+            snapshot_error: snapshotError,
+          },
+        };
+      });
 
       // Step 16: releaseLeaseAndNotify — call IssueAgent.onRunFinished.
       // No within-step retry: a duplicate notify would clobber the agent
