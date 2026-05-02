@@ -35,6 +35,7 @@ import {
 } from "../runs/manifest.js";
 import { parseRuntimeConfig, pickWorkerHost } from "../runtime/factory.js";
 import { runHookWithTimeout } from "../runtime/hooks.js";
+import { DEFAULT_REDACT_LIST } from "../runtime/snapshot.js";
 import type {
   AssetBundleRef,
   R2ObjectRef,
@@ -72,15 +73,6 @@ const DEFAULT_RETRIES: StepRetries = {
 };
 
 const NO_RETRY: StepRetries = { limit: 0, delay: 0 };
-
-const DEFAULT_REDACT_LIST: readonly string[] = [
-  ".env",
-  "**/.git/",
-  "**/secret*",
-  "**/*.key",
-  "**/auth*.json",
-  "runtime/log/",
-];
 
 type StepBody<T> = () => Promise<{ result: T; eventDetail?: Record<string, unknown> }>;
 
