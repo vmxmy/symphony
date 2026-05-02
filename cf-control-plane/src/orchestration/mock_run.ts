@@ -1,9 +1,17 @@
 // Mock orchestration: drives a fake "issue run" from the Worker handler
 // directly, exercising the full D1 row trail (issues + runs + run_events
 // + tool_calls) without touching IssueAgent / ExecutionWorkflow / a real
-// WorkerHost. Phase 3 will replace this with a queue-driven IssueAgent
-// lease and Phase 5 will replace the Worker-resident loop with a durable
-// Cloudflare Workflows instance.
+// WorkerHost.
+//
+// @deprecated Phase 5 replaces this Worker-resident loop with the durable
+// `ExecutionWorkflow` + `MockCodingAgentAdapter` chain (see
+// `src/workflows/execution.ts`). PR-E keeps `executeMockRun` and its admin
+// route alive as a fast-feedback debug surface for Phase 5 bring-up; Phase 6
+// removes both. New operator paths should use:
+//   POST /api/v1/projects/:t/:s/actions/refresh   (tracker poll)
+//   POST /api/v1/admin/inject-failure              (test seam for retry loop)
+// and let the dispatch queue + IssueAgent.startRun chain spin up the real
+// workflow.
 //
 // The shape of the events emitted here matches the canonical step list in
 // docs/cloudflare-agent-native-target.md §8.4 so future code can replay
@@ -58,6 +66,13 @@ export type MockRunInput = {
  * Drives the mock run end-to-end. All writes go through D1; nothing
  * touches R2/Queues/Workflows yet. Idempotent on `issues` (deterministic
  * id + INSERT OR IGNORE) but each invocation starts a fresh `runs` row.
+ *
+ * @deprecated Phase 5 ships the durable `ExecutionWorkflow` chain
+ *   (`src/workflows/execution.ts`) which replaces this loop with real
+ *   Cloudflare Workflows step semantics + R2 manifest. `executeMockRun`
+ *   stays alive as a fast-feedback debug surface for Phase 5 bring-up;
+ *   Phase 6 removes it entirely. Prefer the dispatch queue +
+ *   `IssueAgent.startRun` chain for new admin paths.
  */
 export async function executeMockRun(
   env: Env,

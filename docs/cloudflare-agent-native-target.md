@@ -1139,20 +1139,31 @@ Status sync (2026-05-02, Phase 4 sub-cut 3 PR-D):
 
 ### Phase 5: ExecutionWorkflow without real coding
 
+Status: shipped 2026-05-03 (PRs A-E). Real WorkerHost workspace
+operations remain deferred to Phase 6; codex_compat to Phase 7.
+
 Goal: prove durable workflow orchestration with a mock agent.
 
 Deliverables:
 
-- ExecutionWorkflow skeleton with steps, event emission, D1 run records, R2 event logs.
-- MockCodingAgentAdapter equivalent to current mock adapter behavior.
-- Hook placeholders that do not execute shell commands.
-- Artifact manifest format.
+- [x] ExecutionWorkflow skeleton with steps, event emission, D1 run records, R2 manifest (PR-A scaffold; PR-C 16-step bodies + manifest writer).
+- [x] MockCodingAgentAdapter equivalent to current mock adapter behavior (PR-C; ts-engine mock parity preserved).
+- [x] Hook placeholders that do not execute shell commands (PR-C — steps 5/7/12 are mock no-ops emitting deterministic events).
+- [x] Artifact manifest format (PR-C — `runs/{tenant}/{slug}/{external_id}/{attempt}/manifest.json`, schema v1).
 
 Exit criteria:
 
-- A mirrored issue can complete a mock workflow.
-- Failure at any workflow step can resume or retry without duplicate terminal side effects.
-- Run events are visible in dashboard and persisted to R2/D1.
+- [x] A mirrored issue can complete a mock workflow (`tests/execution_workflow_e2e.test.ts` — 16 steps green end-to-end with R2 manifest).
+- [x] Failure at any workflow step can resume or retry without duplicate terminal side effects (`tests/execution_workflow_steps.test.ts` — `recordStep` idempotency on replay; `tests/cancel_mid_run.test.ts` — step 2 lease conflict goes to `runs.status='failed'` + `IssueAgent.onRunFinished('retry')`; queue redelivery is absorbed by IssueAgent transition idempotency).
+- [x] Run events are visible in dashboard and persisted to R2/D1 (`/dashboard/runs/:t/:s/:e/:attempt` server-rendered HTML with 16-step grid + paged events; manifest at `runs/{tenant}/{slug}/{external_id}/{attempt}/manifest.json`).
+
+Status sync (2026-05-03, Phase 5 PR-E):
+
+- ExecutionWorkflow runs entirely on Cloudflare Workflows step semantics; `MockCodingAgentAdapter` is the only shipped adapter. Phase 6 swaps step 8 over to a real `WorkerHost`-backed adapter; Phase 7 ships `codex_compat`.
+- Step 2 / 8 / 16 use `retries.limit=0` per phase5-plan §9 R-1 — their side effects (lease check / mutating tool calls / lease release) are not replay-safe. The Phase 4 sub-cut 3 retry layer (`IssueAgent.markFailed` + alarm) owns business-layer retries; Cloudflare Queues retries protect transient infra failures only.
+- IssueAgent gains `running` + `completed` states + `workflow_instance_id` lease. `startRun` is idempotent in two layers (in-flight Promise dedup + already-running early-return) so concurrent dispatches and queue at-least-once redelivery never spawn a duplicate workflow instance.
+- Operator surface: `/api/v1/runs/:t/:s/:e/:attempt/{state,events}` (read), `actions/cancel` (write:run.cancel). Dashboard run view at `/dashboard/runs/:t/:s/:e/:attempt`.
+- `executeMockRun` marked `@deprecated`; the synchronous admin route stays alive for Phase 5 bring-up; Phase 6 removes both.
 
 ### Phase 6: Workspace execution on WorkerHosts
 
