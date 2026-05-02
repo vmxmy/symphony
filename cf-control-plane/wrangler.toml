@@ -42,6 +42,17 @@ class_name = "ProjectAgent"
 name = "ISSUE_AGENT"
 class_name = "IssueAgent"
 
+# ---------------------------------------------------------------------------
+# Workflows: ExecutionWorkflow drives the canonical 16-step run loop per
+# target.md §8.4. Phase 5 PR-A scaffolding only — empty no-op steps. PR-C
+# wires the real bodies.
+# ---------------------------------------------------------------------------
+[[workflows]]
+binding = "EXECUTION_WORKFLOW"
+name = "symphony-execution-workflow"
+class_name = "ExecutionWorkflow"
+script_name = "symphony-control-plane"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TenantAgent", "ProjectAgent"]
@@ -55,9 +66,9 @@ new_sqlite_classes = ["IssueAgent"]
 # Provisioned in a follow-up; placeholder kept here so the binding shape is
 # documented next to the D1 binding.
 # ---------------------------------------------------------------------------
-# [[r2_buckets]]
-# binding = "ARTIFACTS"
-# bucket_name = "symphony-runs"
+[[r2_buckets]]
+binding = "ARTIFACTS"
+bucket_name = "symphony-runs"
 
 # ---------------------------------------------------------------------------
 # Queues: tracker-events transport. See target.md §11.

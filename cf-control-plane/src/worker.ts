@@ -17,6 +17,8 @@
 import { TenantAgent } from "./agents/tenant.js";
 import { ProjectAgent } from "./agents/project.js";
 import { IssueAgent } from "./agents/issue.js";
+import { ExecutionWorkflow } from "./workflows/execution.js";
+import type { ExecutionWorkflowParams } from "./workflows/execution.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard } from "./dashboard/render.js";
 import type { DashboardState, ProfileView, RetryView, TenantView } from "./dashboard/render.js";
@@ -38,13 +40,15 @@ import type {
   SymphonyQueueMessage,
 } from "./queues/types.js";
 
-export { TenantAgent, ProjectAgent, IssueAgent };
+export { TenantAgent, ProjectAgent, IssueAgent, ExecutionWorkflow };
 
 interface Env {
   DB: D1Database;
+  ARTIFACTS: R2Bucket;
   TENANT_AGENT: DurableObjectNamespace<TenantAgent>;
   PROJECT_AGENT: DurableObjectNamespace<ProjectAgent>;
   ISSUE_AGENT: DurableObjectNamespace<IssueAgent>;
+  EXECUTION_WORKFLOW: Workflow<ExecutionWorkflowParams>;
   // Bearer token for the placeholder auth gate. If unset, the Worker fails
   // closed: every authenticated route returns 503.
   OPERATOR_TOKEN?: string;
