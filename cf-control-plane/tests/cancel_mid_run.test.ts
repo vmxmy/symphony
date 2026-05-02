@@ -77,7 +77,7 @@ function fakeR2() {
 function fakeIssueAgentNamespace(opts: {
   agentStatus: string;
   agentLease: string | undefined;
-  recordOnRunFinished: (call: { outcome: string }) => void;
+  recordCall: (call: { method: string; outcome?: string; status?: string }) => void;
 }) {
   return {
     idFromName(name: string) {
@@ -86,6 +86,7 @@ function fakeIssueAgentNamespace(opts: {
     get(_id: string) {
       return {
         async getStatus() {
+          opts.recordCall({ method: "getStatus" });
           return {
             tenantId: TENANT_ID,
             slug: SLUG,
@@ -95,7 +96,26 @@ function fakeIssueAgentNamespace(opts: {
           };
         },
         async onRunFinished(_t: string, _s: string, _e: string, outcome: string) {
-          opts.recordOnRunFinished({ outcome });
+          opts.recordCall({ method: "onRunFinished", outcome });
+          return {};
+        },
+        async transition(_t: string, _s: string, _e: string, next: string) {
+          opts.recordCall({ method: "transition", status: next });
+          // Simulate a real IssueAgent rejecting illegal transitions so
+          // the catch path's swallow is exercised when the seeded agent
+          // is not in the running state.
+          if (opts.agentStatus !== "running") {
+            throw new Error(
+              `issue_invalid_transition: ${opts.agentStatus} -> ${next}`,
+            );
+          }
+          return {};
+        },
+        async markFailed(_t: string, _s: string, _e: string, error: string) {
+          opts.recordCall({ method: "markFailed", outcome: error });
+          if (opts.agentStatus !== "running") {
+            throw new Error(`issue_markfailed_invalid_state: ${opts.agentStatus}`);
+          }
           return {};
         },
       };
@@ -112,12 +132,12 @@ function fakeStep() {
   };
 }
 
-describe("ExecutionWorkflow cancel mid run (Phase 5 PR-C)", () => {
-  test("step 2 lease conflict marks run failed, no manifest, onRunFinished('retry') called", async () => {
+describe("ExecutionWorkflow cancel mid run (Phase 5 PR-C / PR-E hardening)", () => {
+  test("step 2 lease conflict marks run failed, no manifest, catch-path triggers attempt-bumping markFailed", async () => {
     const db = createMigratedDatabase();
     seedTenantProfileIssue(db);
     const r2 = fakeR2();
-    const onRunFinishedCalls: Array<{ outcome: string }> = [];
+    const calls: Array<{ method: string; outcome?: string; status?: string }> = [];
 
     // IssueAgent reports cancelled — step 2 acquireLease will detect the
     // mismatch and throw acquire_lease_conflict.
@@ -127,7 +147,7 @@ describe("ExecutionWorkflow cancel mid run (Phase 5 PR-C)", () => {
       ISSUE_AGENT: fakeIssueAgentNamespace({
         agentStatus: "cancelled",
         agentLease: undefined,
-        recordOnRunFinished: (c) => onRunFinishedCalls.push(c),
+        recordCall: (c) => calls.push(c),
       }),
     };
     const workflow = new ExecutionWorkflow(
@@ -174,7 +194,68 @@ describe("ExecutionWorkflow cancel mid run (Phase 5 PR-C)", () => {
     const manifestKey = `runs/${TENANT_ID}/${SLUG}/${EXTERNAL_ID}/${ATTEMPT}/manifest.json`;
     expect(r2.objects.has(manifestKey)).toBe(false);
 
-    // onRunFinished called with retry per the catch handler in execution.ts
-    expect(onRunFinishedCalls).toEqual([{ outcome: "retry" }]);
+    // PR-E hardening: catch path attempts to release the lease (running ->
+    // queued) and then bump the attempt counter via markFailed. Both fail
+    // here because the seeded agent is already 'cancelled' (which is what
+    // caused step 2 acquireLease to throw in the first place); the catch
+    // path swallows both errors. We assert the catch path *tried* to call
+    // both rather than the legacy onRunFinished('retry') so the silent
+    // attempt-leak follow-up from architect review stays closed.
+    const stepCalls = calls.map((c) => c.method);
+    expect(stepCalls).toContain("getStatus");      // step 2 ran
+    expect(stepCalls).toContain("transition");     // catch path released lease attempt
+    expect(stepCalls).toContain("markFailed");     // catch path bumped attempt attempt
+    expect(stepCalls).not.toContain("onRunFinished"); // legacy path no longer used
+  });
+
+  test("running agent: catch path bumps attempt via markFailed (no UNIQUE collision on retry)", async () => {
+    const db = createMigratedDatabase();
+    seedTenantProfileIssue(db);
+    const r2 = fakeR2();
+    const calls: Array<{ method: string; outcome?: string; status?: string }> = [];
+
+    // Seed an agent in 'running' so catch-path transition + markFailed
+    // succeed (the happy failure path). Force a failure mid-step by making
+    // step 2 acquireLease detect a lease mismatch — agentLease differs from
+    // params.workflow_instance_id.
+    const env = {
+      DB: asD1(db),
+      ARTIFACTS: r2.bucket,
+      ISSUE_AGENT: fakeIssueAgentNamespace({
+        agentStatus: "running",
+        agentLease: "run:other:other:other:0",
+        recordCall: (c) => calls.push(c),
+      }),
+    };
+    const workflow = new ExecutionWorkflow(
+      {} as unknown as ConstructorParameters<typeof ExecutionWorkflow>[0],
+      env as unknown as ConstructorParameters<typeof ExecutionWorkflow>[1],
+    );
+    const params: ExecutionWorkflowParams = {
+      tenant_id: TENANT_ID,
+      slug: SLUG,
+      external_id: EXTERNAL_ID,
+      identifier: "SYM-1",
+      attempt: ATTEMPT,
+      workflow_instance_id: WORKFLOW_INSTANCE_ID,
+    };
+
+    let thrown: unknown;
+    try {
+      await workflow.run(
+        { payload: params } as unknown as Parameters<typeof workflow.run>[0],
+        fakeStep() as unknown as Parameters<typeof workflow.run>[1],
+      );
+    } catch (e) {
+      thrown = e;
+    }
+    expect((thrown as Error)?.message).toMatch(/^acquire_lease_conflict:/);
+
+    const transitionCall = calls.find((c) => c.method === "transition");
+    expect(transitionCall).toBeDefined();
+    expect(transitionCall?.status).toBe("queued");
+    const markFailedCall = calls.find((c) => c.method === "markFailed");
+    expect(markFailedCall).toBeDefined();
+    expect(markFailedCall?.outcome).toMatch(/^acquire_lease_conflict:/);
   });
 });
