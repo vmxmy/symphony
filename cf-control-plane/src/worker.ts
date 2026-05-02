@@ -34,6 +34,7 @@ import { extractLinearTrackerConfig } from "./tracker/config.js";
 import { assertControlPlaneId, durableObjectName } from "./identity.js";
 import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/scheduled_poll.js";
 import { handleTrackerRefresh, handleIssueDispatch } from "./queues/handlers.js";
+import { parseRuntimeConfig } from "./runtime/factory.js";
 import type {
   TrackerRefreshMessage,
   IssueDispatchMessage,
@@ -529,6 +530,37 @@ export default {
             { status: 502 },
           );
         }
+      }
+
+      // ---- runtime config route (Phase 6 PR-E-1) -----------------------
+      const profileRuntime = url.pathname.match(
+        /^\/api\/v1\/profiles\/([^/]+)\/([^/]+)\/runtime$/,
+      );
+      if (profileRuntime) {
+        if (req.method !== "GET") return methodNotAllowed(["GET"]);
+        const [, tenantId, slug] = profileRuntime;
+        const denied = requireCapability(principal, "read:state");
+        if (denied) return denied;
+        try {
+          assertControlPlaneId("tenant", tenantId!);
+          assertControlPlaneId("profile", slug!);
+        } catch (e) {
+          return jsonResponse(
+            { error: "invalid_profile_id", message: String((e as Error).message) },
+            { status: 400 },
+          );
+        }
+        const profileId = `${tenantId}/${slug}`;
+        const row = await env.DB.prepare(
+          `SELECT config_json FROM profiles WHERE id = ?`,
+        )
+          .bind(profileId)
+          .first<{ config_json: string | null }>();
+        if (!row) {
+          return jsonResponse({ error: "profile_not_found" }, { status: 404 });
+        }
+        const runtime = parseRuntimeConfig(row.config_json);
+        return jsonResponse({ runtime });
       }
 
       // ---- mock orchestration (Phase 2 last cut; Phase 3 replaces) ----
