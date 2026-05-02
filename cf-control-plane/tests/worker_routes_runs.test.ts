@@ -167,10 +167,30 @@ describe("Phase 5 PR-D run routes", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { run: { id: string; status: string }; steps: unknown[] };
+    const body = (await res.json()) as { run: { id: string; status: string }; steps: unknown[]; runtime: { host: string } };
     expect(body.run.id).toBe(RUN_ID);
     expect(body.run.status).toBe("completed");
     expect(body.steps).toHaveLength(3);
+    expect(body.runtime).toEqual({ host: "mock" });
+  });
+
+  test("GET /state returns runtime.host=vps_docker when profile config specifies it", async () => {
+    const db = createMigratedDatabase();
+    seedRun(db);
+    // Update the profile's config_json to specify vps_docker runtime.
+    db.query(`UPDATE profiles SET config_json = ? WHERE id = ?`).run(
+      JSON.stringify({ runtime: { host: "vps_docker" } }),
+      PROFILE_ID,
+    );
+    const { env } = makeEnv({ db });
+    const res = await worker.fetch(
+      call("GET", `/api/v1/runs/${TENANT}/${SLUG}/${EXTERNAL_ID}/${ATTEMPT}/state`),
+      env,
+      {},
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { run: { id: string }; steps: unknown[]; runtime: { host: string } };
+    expect(body.runtime).toEqual({ host: "vps_docker" });
   });
 
   test("GET /state returns 404 when run is missing", async () => {

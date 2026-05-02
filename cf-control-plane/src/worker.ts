@@ -621,7 +621,8 @@ export default {
           return jsonResponse({ error: "invalid_attempt" }, { status: 400 });
         }
         const runId = `run:${tenantId}:${slug}:${externalId}:${attempt}`;
-        const [run, steps] = await Promise.all([
+        const profileId = `${tenantId}/${slug}`;
+        const [run, steps, profileRow] = await Promise.all([
           env.DB.prepare(
             `SELECT id, issue_id, attempt, status, workflow_id, adapter_kind,
                     started_at, finished_at, error, token_usage_json,
@@ -643,16 +644,23 @@ export default {
               finished_at: string | null;
               error: string | null;
             }>(),
+          env.DB.prepare(
+            `SELECT config_json FROM profiles WHERE id = ?`,
+          )
+            .bind(profileId)
+            .first<{ config_json: string | null }>(),
         ]);
         if (!run) {
           return jsonResponse({ error: "run_not_found", run_id: runId }, { status: 404 });
         }
+        const runtime = parseRuntimeConfig(profileRow?.config_json ?? null);
         return jsonResponse({
           run: {
             ...run,
             token_usage: safeJsonParse<unknown>(run.token_usage_json as string | null, null),
           },
           steps: steps.results ?? [],
+          runtime,
         });
       }
 
