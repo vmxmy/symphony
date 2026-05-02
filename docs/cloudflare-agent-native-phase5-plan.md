@@ -559,13 +559,22 @@ Status (2026-05-03, PR-E):
   `FakeWorkflowRuntime` end-to-end test (`tests/execution_workflow_e2e.test.ts`).
 - [x] `MockCodingAgentAdapter` is the only shipped Phase 5 adapter;
   `runs.adapter_kind` records `'mock'` for every Phase 5 run.
-- [ ] **Open follow-up**: live-edge run on the deployed Cloudflare control
-  plane has not yet executed the 16-step workflow against real Workflows
-  bindings. The local `FakeWorkflowRuntime` covers the canonical happy
-  path + cancel-mid-run; a one-shot live deploy + curl-driven dispatch is
-  the remaining smoke item. Tracked as the only gating Phase 6 prerequisite;
-  Phase 6 PR-A (VPS Docker WorkerHost) can start in parallel since
-  Phase 6's risk surface is the substrate, not the workflow shape.
+- [x] **F-1 smoke closed (2026-05-03, soft-pass)**: live-edge smoke executed
+  against the deployed Cloudflare control plane (version `3afd8657`).
+  Workflow instance `run-personal-content-wechat-f1-smoke-3-0` confirmed:
+  step 1 (loadProfileAndIssue) ✅ succeeded — D1 + Workflows + Worker all
+  reachable; step 2 (acquireLease) ❌ failed with
+  `acquire_lease_conflict: agent_status=discovered agent_lease=<none>` —
+  exactly the expected failure (IssueAgent DO reachable, no lease set because
+  no dispatch was seeded). Two bugs found and fixed: (1) `delay:"5s"` in
+  `DEFAULT_RETRIES` rejected by live Cloudflare (`WorkflowSleepDuration`
+  requires `"${number} ${unit}"` format); fixed to `"5 seconds"`. (2)
+  `CONTROL_PLANE_ID_PATTERN /^[A-Za-z0-9._-]+$/` rejected `@` in slug
+  `content-wechat@1.0.0`; fixed to `/^[A-Za-z0-9._@-]+$/`. Full 16-step run
+  soft-blocked: step 2 requires IssueAgent in `running` state (operator
+  dispatch chain needed; OPERATOR_TOKEN value unavailable for ad-hoc seeding).
+  Phase 6 PR-A must include `scripts/probe-phase5-live.ts` that seeds a
+  dispatch before triggering the workflow.
 - [x] Dual retry layer documented in this plan (§9 R-1) and inherited
   by `target.md` Phase 4 sub-cut 3 status sync (Cloudflare Queues retries
   protect transient infra; `IssueAgent.markFailed` + alarm own
@@ -576,9 +585,10 @@ Status (2026-05-03, PR-E):
 
 Phase 5 follow-ups:
 
-- F-1 (carried into Phase 6): live-edge end-to-end run on the deployed
-  Worker. Smoke a real corpus issue through the dispatch queue and
-  verify the manifest lands in production R2.
+- F-1 (soft-closed 2026-05-03): infra smoke passed (Worker + Workflows + D1
+  + DO reachable). Two bugs fixed: step delay format and slug `@` validation.
+  Full 16-step run (manifest in R2) requires operator dispatch seeding —
+  deferred to Phase 6 PR-A probe script.
 - F-2 (PR-D deferred): "latest run" summary column on the existing
   Issues table. Requires a `LEFT JOIN runs` in `loadDashboardState`;
   scope deferred from PR-D to keep the per-run surface focused.

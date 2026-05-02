@@ -1,8 +1,8 @@
-export const CONTROL_PLANE_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
+export const CONTROL_PLANE_ID_PATTERN = /^[A-Za-z0-9._@-]+$/;
 
 export function assertControlPlaneId(kind: string, value: string): void {
   if (!value || !CONTROL_PLANE_ID_PATTERN.test(value)) {
-    throw new Error(`${kind}_invalid: expected [A-Za-z0-9._-]+`);
+    throw new Error(`${kind}_invalid: expected [A-Za-z0-9._@-]+`);
   }
 }
 

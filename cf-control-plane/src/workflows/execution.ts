@@ -17,9 +17,9 @@
 // - R2 manifest path is deterministic per run, so replay re-writes the
 //   same key (R2 1/sec same-key cap is irrelevant for a final manifest).
 // - Steps 2 (acquireLease), 8 (runAgentTurnLoop), and 16
-//   (releaseLeaseAndNotify) use { retries: { limit: 0 } } because their
-//   side effects are not replay-safe. All other steps use the default
-//   { limit: 3, delay: 5s, backoff: exponential }.
+//   (releaseLeaseAndNotify) use { retries: { limit: 0, delay: 0 } } because
+//   their side effects are not replay-safe. All other steps use the default
+//   { limit: 3, delay: "5 seconds", backoff: "exponential" }.
 //
 // Phase 5 invariant: only MockCodingAgentAdapter ships. Real workspace
 // ops are Phase 6; codex_compat is Phase 7.
@@ -51,17 +51,17 @@ type Env = {
 
 type StepRetries = {
   limit: number;
-  delay?: string;
+  delay?: string | number;
   backoff?: "exponential" | "linear" | "constant";
 };
 
 const DEFAULT_RETRIES: StepRetries = {
   limit: 3,
-  delay: "5s",
+  delay: "5 seconds",
   backoff: "exponential",
 };
 
-const NO_RETRY: StepRetries = { limit: 0 };
+const NO_RETRY: StepRetries = { limit: 0, delay: 0 };
 
 type StepBody<T> = () => Promise<{ result: T; eventDetail?: Record<string, unknown> }>;
 
