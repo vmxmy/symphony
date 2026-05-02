@@ -373,6 +373,7 @@ export type RunDetailEventView = {
 };
 
 import type { WorkerHostKind } from "../runtime/worker_host.js";
+import type { CodingAgentKind } from "../contracts/coding_agent.js";
 
 export type RunDetailView = {
   generated_at: string;
@@ -395,7 +396,7 @@ export type RunDetailView = {
   };
   steps: RunDetailStepView[];
   events: RunDetailEventView[];
-  runtime: { host: WorkerHostKind };
+  runtime: { host: WorkerHostKind; coding_agent: CodingAgentKind };
 };
 
 function stepDurationMs(s: RunDetailStepView): number | null {
@@ -509,6 +510,8 @@ export function renderRunDetail(state: RunDetailView): string {
       <dd><code>${escape(state.run.adapter_kind)}</code></dd>
       <dt>Substrate</dt>
       <dd><code>${escape(state.runtime.host)}</code></dd>
+      <dt>Coding Agent</dt>
+      <dd><code>${escape(state.runtime.coding_agent)}</code></dd>
       <dt>Tenant / Profile</dt>
       <dd><code>${escape(state.run.tenant_id)}</code> / <code>${escape(state.run.slug)}</code></dd>
       <dt>Issue</dt>

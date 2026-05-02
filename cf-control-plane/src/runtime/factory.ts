@@ -26,33 +26,41 @@ export type RuntimeEnv = {
 
 export type RuntimeConfig = {
   host: WorkerHostKind;
+  coding_agent: CodingAgentKind;
 };
 
 const VALID_KINDS: ReadonlySet<WorkerHostKind> = new Set(["mock", "vps_docker", "cloudflare_container"]);
 
-export function parseRuntimeConfig(rawConfigJson: string | null | undefined): RuntimeConfig {
+function parseRuntimeHost(rawConfigJson: string | null | undefined): WorkerHostKind {
   if (rawConfigJson === null || rawConfigJson === undefined || rawConfigJson === "") {
-    return { host: "mock" };
+    return "mock";
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawConfigJson);
   } catch {
-    return { host: "mock" };
+    return "mock";
   }
   if (typeof parsed !== "object" || parsed === null) {
-    return { host: "mock" };
+    return "mock";
   }
   const obj = parsed as Record<string, unknown>;
   const runtime = obj.runtime;
   if (typeof runtime !== "object" || runtime === null) {
-    return { host: "mock" };
+    return "mock";
   }
   const host = (runtime as Record<string, unknown>).host;
   if (typeof host !== "string" || !VALID_KINDS.has(host as WorkerHostKind)) {
-    return { host: "mock" };
+    return "mock";
   }
-  return { host: host as WorkerHostKind };
+  return host as WorkerHostKind;
+}
+
+export function parseRuntimeConfig(rawConfigJson: string | null | undefined): RuntimeConfig {
+  return {
+    host: parseRuntimeHost(rawConfigJson),
+    coding_agent: parseCodingAgentKind(rawConfigJson),
+  };
 }
 
 export function pickWorkerHost(env: RuntimeEnv, config: RuntimeConfig): WorkerHost {

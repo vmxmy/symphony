@@ -15,7 +15,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig(null);
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=mock for undefined input", () => {
@@ -23,7 +23,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig(undefined);
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=mock for empty string input", () => {
@@ -31,7 +31,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig("");
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=mock for non-JSON string", () => {
@@ -39,7 +39,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig("not valid json");
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=mock for JSON with unknown host value", () => {
@@ -47,7 +47,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig('{"runtime":{"host":"unknown"}}');
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=mock for JSON explicitly specifying mock", () => {
@@ -55,7 +55,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig('{"runtime":{"host":"mock"}}');
 
     // #then
-    expect(result.host).toBe("mock");
+    expect(result).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   it("returns host=vps_docker for JSON specifying vps_docker", () => {
@@ -63,7 +63,7 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig('{"runtime":{"host":"vps_docker"}}');
 
     // #then
-    expect(result.host).toBe("vps_docker");
+    expect(result).toEqual({ host: "vps_docker", coding_agent: "mock" });
   });
 
   it("returns host=cloudflare_container for JSON specifying cloudflare_container", () => {
@@ -71,14 +71,38 @@ describe("parseRuntimeConfig", () => {
     const result = parseRuntimeConfig('{"runtime":{"host":"cloudflare_container"}}');
 
     // #then
-    expect(result.host).toBe("cloudflare_container");
+    expect(result).toEqual({ host: "cloudflare_container", coding_agent: "mock" });
+  });
+
+  it("returns coding_agent=mock when coding_agent field is absent", () => {
+    // #given / #when
+    const result = parseRuntimeConfig('{"runtime":{"host":"mock"}}');
+
+    // #then
+    expect(result.coding_agent).toBe("mock");
+  });
+
+  it("returns coding_agent=codex_compat when coding_agent is codex_compat", () => {
+    // #given / #when
+    const result = parseRuntimeConfig('{"runtime":{"host":"mock","coding_agent":"codex_compat"}}');
+
+    // #then
+    expect(result.coding_agent).toBe("codex_compat");
+  });
+
+  it("returns both host=vps_docker and coding_agent=codex_compat when both fields are set", () => {
+    // #given / #when
+    const result = parseRuntimeConfig('{"runtime":{"host":"vps_docker","coding_agent":"codex_compat"}}');
+
+    // #then
+    expect(result).toEqual({ host: "vps_docker", coding_agent: "codex_compat" });
   });
 });
 
 describe("pickWorkerHost", () => {
   it("returns MockWorkerHost for host=mock", () => {
     // #given
-    const config = { host: "mock" } as const;
+    const config = { host: "mock", coding_agent: "mock" } as const;
 
     // #when
     const host = pickWorkerHost({}, config);
@@ -90,7 +114,7 @@ describe("pickWorkerHost", () => {
   it("returns VpsDockerHost for host=vps_docker with credentials present", () => {
     // #given
     const env = { VPS_BRIDGE_BASE_URL: "https://bridge.example.com", VPS_BRIDGE_TOKEN: "tok" };
-    const config = { host: "vps_docker" } as const;
+    const config = { host: "vps_docker", coding_agent: "mock" } as const;
 
     // #when
     const host = pickWorkerHost(env, config);
@@ -101,7 +125,7 @@ describe("pickWorkerHost", () => {
 
   it("throws vps_docker_runtime_misconfigured when env vars are missing for vps_docker", () => {
     // #given
-    const config = { host: "vps_docker" } as const;
+    const config = { host: "vps_docker", coding_agent: "mock" } as const;
 
     // #when / #then
     expect(() => pickWorkerHost({}, config)).toThrow("vps_docker_runtime_misconfigured");
@@ -109,7 +133,7 @@ describe("pickWorkerHost", () => {
 
   it("throws not_implemented_yet for host=cloudflare_container", () => {
     // #given
-    const config = { host: "cloudflare_container" } as const;
+    const config = { host: "cloudflare_container", coding_agent: "mock" } as const;
 
     // #when / #then
     expect(() => pickWorkerHost({}, config)).toThrow("not_implemented_yet");

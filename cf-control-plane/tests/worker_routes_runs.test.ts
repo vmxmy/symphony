@@ -167,11 +167,11 @@ describe("Phase 5 PR-D run routes", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { run: { id: string; status: string }; steps: unknown[]; runtime: { host: string } };
+    const body = (await res.json()) as { run: { id: string; status: string }; steps: unknown[]; runtime: { host: string; coding_agent: string } };
     expect(body.run.id).toBe(RUN_ID);
     expect(body.run.status).toBe("completed");
     expect(body.steps).toHaveLength(3);
-    expect(body.runtime).toEqual({ host: "mock" });
+    expect(body.runtime).toEqual({ host: "mock", coding_agent: "mock" });
   });
 
   test("GET /state returns runtime.host=vps_docker when profile config specifies it", async () => {
@@ -189,8 +189,8 @@ describe("Phase 5 PR-D run routes", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { run: { id: string }; steps: unknown[]; runtime: { host: string } };
-    expect(body.runtime).toEqual({ host: "vps_docker" });
+    const body = (await res.json()) as { run: { id: string }; steps: unknown[]; runtime: { host: string; coding_agent: string } };
+    expect(body.runtime).toEqual({ host: "vps_docker", coding_agent: "mock" });
   });
 
   test("GET /state returns 404 when run is missing", async () => {

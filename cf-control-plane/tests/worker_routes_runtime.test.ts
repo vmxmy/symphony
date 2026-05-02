@@ -106,8 +106,9 @@ describe("Phase 6 PR-E-1 runtime route", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { runtime: { host: string } };
+    const body = (await res.json()) as { runtime: { host: string; coding_agent: string } };
     expect(body.runtime.host).toBe("mock");
+    expect(body.runtime.coding_agent).toBe("mock");
   });
 
   test("200 returns mock host when runtime.host is explicitly mock", async () => {
@@ -120,8 +121,9 @@ describe("Phase 6 PR-E-1 runtime route", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { runtime: { host: string } };
+    const body = (await res.json()) as { runtime: { host: string; coding_agent: string } };
     expect(body.runtime.host).toBe("mock");
+    expect(body.runtime.coding_agent).toBe("mock");
   });
 
   test("200 returns vps_docker host when runtime.host is vps_docker", async () => {
@@ -134,8 +136,9 @@ describe("Phase 6 PR-E-1 runtime route", () => {
       {},
     );
     expect(res.status).toBe(200);
-    const body = (await res.json()) as { runtime: { host: string } };
+    const body = (await res.json()) as { runtime: { host: string; coding_agent: string } };
     expect(body.runtime.host).toBe("vps_docker");
+    expect(body.runtime.coding_agent).toBe("mock");
   });
 
   test("404 when profile does not exist in DB", async () => {
