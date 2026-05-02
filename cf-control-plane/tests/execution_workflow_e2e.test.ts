@@ -27,6 +27,7 @@ mock.module("cloudflare:workers", () => ({
 
 const { ExecutionWorkflow } = await import("../src/workflows/execution.js");
 import type { ExecutionWorkflowParams } from "../src/workflows/execution.js";
+import { manifestKey } from "../src/runs/manifest.js";
 
 const TENANT_ID = "tenant";
 const SLUG = "profile";
@@ -218,9 +219,15 @@ describe("ExecutionWorkflow end-to-end (Phase 5 PR-C)", () => {
     expect(toolRows).toHaveLength(1);
     expect(toolRows[0]).toEqual({ tool_name: "linear_graphql", status: "completed" });
 
-    // R2 manifest is parseable JSON with the expected shape
-    const manifestKey = `runs/${TENANT_ID}/${SLUG}/${EXTERNAL_ID}/${ATTEMPT}/manifest.json`;
-    const manifestObj = r2.objects.get(manifestKey);
+    // R2 manifest is parseable JSON with the expected shape. Use the
+    // exported manifestKey() helper so the path contract stays in one place.
+    const key = manifestKey({
+      tenant_id: TENANT_ID,
+      slug: SLUG,
+      external_id: EXTERNAL_ID,
+      attempt: ATTEMPT,
+    });
+    const manifestObj = r2.objects.get(key);
     expect(manifestObj).toBeDefined();
     const manifest = JSON.parse(manifestObj?.body ?? "{}");
     expect(manifest.schema).toBe("v1");

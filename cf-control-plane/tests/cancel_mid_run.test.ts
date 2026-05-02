@@ -27,6 +27,7 @@ mock.module("cloudflare:workers", () => ({
 
 const { ExecutionWorkflow } = await import("../src/workflows/execution.js");
 import type { ExecutionWorkflowParams } from "../src/workflows/execution.js";
+import { manifestKey } from "../src/runs/manifest.js";
 
 const TENANT_ID = "tenant";
 const SLUG = "profile";
@@ -190,9 +191,15 @@ describe("ExecutionWorkflow cancel mid run (Phase 5 PR-C / PR-E hardening)", () 
     expect(stepRows[0]).toMatchObject({ step_sequence: 1, status: "completed" });
     expect(stepRows[1]).toMatchObject({ step_sequence: 2, step_name: "acquireLease", status: "failed" });
 
-    // R2 has no manifest
-    const manifestKey = `runs/${TENANT_ID}/${SLUG}/${EXTERNAL_ID}/${ATTEMPT}/manifest.json`;
-    expect(r2.objects.has(manifestKey)).toBe(false);
+    // R2 has no manifest. Use the exported manifestKey() helper so the
+    // path contract stays in one place (manifest.ts).
+    const key = manifestKey({
+      tenant_id: TENANT_ID,
+      slug: SLUG,
+      external_id: EXTERNAL_ID,
+      attempt: ATTEMPT,
+    });
+    expect(r2.objects.has(key)).toBe(false);
 
     // PR-E hardening: catch path attempts to release the lease (running ->
     // queued) and then bump the attempt counter via markFailed. Both fail
