@@ -1,0 +1,69 @@
+// File header: plan ref docs/cloudflare-agent-native-phase6-plan.md §3 R9 + §4 + §5 PR-C.
+//
+// pickWorkerHost is the single dispatch point for selecting which substrate
+// runs a profile's workspace operations. Phase 5 default profile carries
+// runtime.host = "mock", so this dispatch returns MockWorkerHost and the
+// workflow's behaviour is unchanged from Phase 5. Future profiles set to
+// "vps_docker" will route through VpsDockerHost (PR-B) using the
+// VPS_BRIDGE_BASE_URL + VPS_BRIDGE_TOKEN secrets the Worker is provisioned
+// with.
+
+import type { WorkerHost, WorkerHostKind } from "./worker_host.js";
+import { MockWorkerHost } from "./mock_worker_host.js";
+import { VpsDockerHost } from "./vps_docker_host.js";
+
+export type RuntimeEnv = {
+  VPS_BRIDGE_BASE_URL?: string;
+  VPS_BRIDGE_TOKEN?: string;
+};
+
+export type RuntimeConfig = {
+  host: WorkerHostKind;
+};
+
+const VALID_KINDS: ReadonlySet<WorkerHostKind> = new Set(["mock", "vps_docker", "cloudflare_container"]);
+
+export function parseRuntimeConfig(rawConfigJson: string | null | undefined): RuntimeConfig {
+  if (rawConfigJson === null || rawConfigJson === undefined || rawConfigJson === "") {
+    return { host: "mock" };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawConfigJson);
+  } catch {
+    return { host: "mock" };
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return { host: "mock" };
+  }
+  const obj = parsed as Record<string, unknown>;
+  const runtime = obj.runtime;
+  if (typeof runtime !== "object" || runtime === null) {
+    return { host: "mock" };
+  }
+  const host = (runtime as Record<string, unknown>).host;
+  if (typeof host !== "string" || !VALID_KINDS.has(host as WorkerHostKind)) {
+    return { host: "mock" };
+  }
+  return { host: host as WorkerHostKind };
+}
+
+export function pickWorkerHost(env: RuntimeEnv, config: RuntimeConfig): WorkerHost {
+  switch (config.host) {
+    case "mock":
+      return new MockWorkerHost();
+    case "vps_docker": {
+      if (!env.VPS_BRIDGE_BASE_URL || !env.VPS_BRIDGE_TOKEN) {
+        throw new Error(
+          "vps_docker_runtime_misconfigured: VPS_BRIDGE_BASE_URL and VPS_BRIDGE_TOKEN must be set",
+        );
+      }
+      return new VpsDockerHost({
+        bridgeBaseUrl: env.VPS_BRIDGE_BASE_URL,
+        authToken: env.VPS_BRIDGE_TOKEN,
+      });
+    }
+    case "cloudflare_container":
+      throw new Error("not_implemented_yet: cloudflare_container WorkerHost is Phase 6.B / PR-E scope");
+  }
+}
