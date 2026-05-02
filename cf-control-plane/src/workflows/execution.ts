@@ -171,6 +171,24 @@ type IssueAgentLeaseStub = {
     externalId: string,
     outcome: "completed" | "failed" | "cancelled" | "retry",
   ): Promise<unknown>;
+  // Used by the catch path so a workflow failure releases the lease
+  // (running -> queued) and then bumps the attempt counter via markFailed.
+  // Without this two-step the next dispatch would collide on
+  // runs.UNIQUE(issue_id, attempt) with the same attempt number.
+  transition(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    next: string,
+    decidedBy?: string,
+    reason?: string,
+  ): Promise<unknown>;
+  markFailed(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    error: string,
+  ): Promise<unknown>;
 };
 
 function leaseStub(env: Env, params: ExecutionWorkflowParams): IssueAgentLeaseStub {
@@ -499,20 +517,40 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
       )
         .bind(new Date().toISOString(), lastError, runId)
         .run();
-      // Best-effort lease release on failure: route IssueAgent back to
-      // queued so the next attempt re-evaluates retry_wait vs failed via
-      // markFailed. Swallow errors here — the workflow has already failed
-      // and we do not want secondary failures to mask the primary one.
+      // Best-effort failure path: release the lease (running -> queued)
+      // then bump the attempt counter via markFailed so the next dispatch
+      // does not collide on runs.UNIQUE(issue_id, attempt) with the same
+      // attempt number. markFailed picks retry_wait vs failed based on
+      // the per-issue maxAttempts policy and schedules an alarm; the
+      // alarm-driven re-dispatch creates a *new* workflow instance with
+      // the bumped attempt. Swallow errors here — the workflow has
+      // already failed and we do not want secondary failures to mask
+      // the primary one.
+      const stub = leaseStub(this.env, params);
+      // Each call is independently best-effort: a stuck transition (e.g.
+      // because the agent is already in a terminal state from an operator
+      // cancel that raced this catch path) must not skip markFailed.
       try {
-        const stub = leaseStub(this.env, params);
-        await stub.onRunFinished(
+        await stub.transition(
           params.tenant_id,
           params.slug,
           params.external_id,
-          "retry",
+          "queued",
+          "execution-workflow",
+          "workflow-failed",
         );
       } catch {
-        /* swallow */
+        /* swallow — agent may already be in a terminal state */
+      }
+      try {
+        await stub.markFailed(
+          params.tenant_id,
+          params.slug,
+          params.external_id,
+          lastError,
+        );
+      } catch {
+        /* swallow — agent may not be in queued (terminal already) */
       }
       throw e;
     }

@@ -554,6 +554,28 @@ Phase 5 follow-ups:
 - F-4 (Phase 6 entry): replace the `MockCodingAgentAdapter` call in
   step 8 with the WorkerHost-backed adapter; the workflow shape is
   unchanged.
+- F-5 (Phase 6 entry, from architect review): `IssueAgent.startRun`
+  persists `workflow_instance_id` *before* `EXECUTION_WORKFLOW.create`
+  so an exception inside `create()` after the storage write would leave
+  a stale lease pointing at no workflow instance. Cloudflare Workflows
+  `.create()` is documented as idempotent on the same id, so a queue
+  retry's second `startRun` would re-run `create` against the same id
+  and succeed. The narrow window worth hardening: if `create()` fails
+  permanently (e.g. workflow class not registered), the agent stays in
+  `running` forever. Phase 6 entry should add either an
+  `instance.status()` probe on the idempotent path or move the storage
+  put after `create()`. Tracked at
+  `cf-control-plane/src/agents/issue.ts:271-277`.
+- F-6 (Phase 6 entry, from architect review): the final manifest write
+  at `cf-control-plane/src/workflows/execution.ts:447-487` runs OUTSIDE
+  any `step.do` boundary. R2 same-key overwrite is harmless under
+  replay, but the write reads fresh D1 step rows on each run, so a
+  partial-success replay could observe a slightly different snapshot
+  than the original. Phase 6 entry can either wrap as a logical step 17
+  inside `step.do` (with `retries.limit=0`) or accept the trade-off
+  with an explicit comment. Current state: documented in the file
+  header; not blocking Phase 5 close because dashboard / archive
+  readers tolerate a minor manifest snapshot drift under replay.
 
 ## 12. Out of Scope
 
