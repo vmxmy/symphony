@@ -48,6 +48,12 @@ Phase 4 (IssueAgent dispatch and retry/backoff):
 - [x] Failed issues stay visible as `issue_retries` rows with empty `due_at`; reconcile treats empty due dates as not due.
 - [x] Dashboard renders a read-only Retries section; operator retry/resume actions remain Bearer-only API calls for CLI/curl.
 
+Phase 6 PR-A (WorkerHost contract + MockWorkerHost + F-5 + F-6 + grep gates):
+
+- [x] `WorkerHost` interface and `MockWorkerHost` implementation in `src/runtime/` (commit TBD-PR-A).
+- [x] ADR-0001 dispatch isolation: `switch`/`if`-on-`WorkerHostKind` outside `src/runtime/` blocked by `scripts/check-phase6-invariants.ts`.
+- [x] 16 canonical step names locked by the same invariants gate.
+
 Phase 5 (ExecutionWorkflow on Cloudflare Workflows with MockCodingAgentAdapter):
 
 - [x] ExecutionWorkflow class registered via `[[workflows]] EXECUTION_WORKFLOW`; R2 binding `ARTIFACTS = symphony-runs`.

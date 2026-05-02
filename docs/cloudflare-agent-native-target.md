@@ -1165,6 +1165,11 @@ Status sync (2026-05-03, Phase 5 PR-E):
 - Operator surface: `/api/v1/runs/:t/:s/:e/:attempt/{state,events}` (read), `actions/cancel` (write:run.cancel). Dashboard run view at `/dashboard/runs/:t/:s/:e/:attempt`.
 - `executeMockRun` marked `@deprecated`; the synchronous admin route stays alive for Phase 5 bring-up; Phase 6 removes both.
 
+Status sync (2026-05-03, Phase 6 PR-A):
+
+- `WorkerHost` contract (`src/runtime/worker_host.ts`) and `MockWorkerHost` (`src/runtime/mock_worker_host.ts`) land Phase 6 F-5 + F-6. ADR-0001 dispatch isolation enforced by grep gate (`scripts/check-phase6-invariants.ts`). Canonical 16-step names locked in the same gate.
+- Phase 6 PR-A commit: TBD-PR-A
+
 ### Phase 6: Workspace execution on WorkerHosts
 
 Goal: run real workspace operations under an isolated WorkerHost, starting with VPS Docker for the dev loop and keeping Cloudflare-managed execution as an adapter target.

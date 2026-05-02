@@ -463,53 +463,67 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
       // steps have terminal status. R2 same-key cap is irrelevant —
       // multi-second gap between step 11 and this write — and the key is
       // deterministic so a replay safely overwrites identical content.
-      const finalStepRows = await this.env.DB.prepare(
-        `SELECT step_sequence, step_name, status, started_at, finished_at
-           FROM run_steps WHERE run_id = ? ORDER BY step_sequence`,
-      )
-        .bind(runId)
-        .all<{
-          step_sequence: number;
-          step_name: string;
-          status: string;
-          started_at: string;
-          finished_at: string | null;
-        }>();
-      const finalEventCountRow = await this.env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM run_events WHERE run_id = ?`,
-      )
-        .bind(runId)
-        .first<{ n: number }>();
-      const finalFinishedAt = new Date().toISOString();
-      const finalSteps: ManifestStepEntry[] = (finalStepRows.results ?? []).map((r) => ({
-        step_sequence: r.step_sequence,
-        step_name: r.step_name,
-        status: r.status as ManifestStepEntry["status"],
-        duration_ms: r.finished_at
-          ? new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()
-          : 0,
-      }));
-      const finalManifest: ManifestPayload = {
-        schema: "v1",
-        run_id: runId,
-        tenant_id: params.tenant_id,
-        slug: params.slug,
-        issue_external_id: params.external_id,
-        attempt: params.attempt,
-        steps: finalSteps,
-        started_at: startedAt,
-        finished_at: finalFinishedAt,
-        token_usage: tokenUsage,
-        events_count: finalEventCountRow?.n ?? 0,
+      //
+      // F-6 (phase 6 PR-A): wrap in a private step.do("finalizeManifest")
+      // boundary so Workflows replay caches the result and does not
+      // re-execute the body on a partial-success replay. This boundary is
+      // deliberately NOT routed through recordStep — finalizeManifest is a
+      // replay-safety boundary, not a logical workflow step, so it does NOT
+      // add a run_steps row and the canonical 16-row invariant is preserved.
+      const finalizeBody: StepDoBody<{ finished_at: string }> = async () => {
+        const finalStepRows = await this.env.DB.prepare(
+          `SELECT step_sequence, step_name, status, started_at, finished_at
+             FROM run_steps WHERE run_id = ? ORDER BY step_sequence`,
+        )
+          .bind(runId)
+          .all<{
+            step_sequence: number;
+            step_name: string;
+            status: string;
+            started_at: string;
+            finished_at: string | null;
+          }>();
+        const finalEventCountRow = await this.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM run_events WHERE run_id = ?`,
+        )
+          .bind(runId)
+          .first<{ n: number }>();
+        const finalFinishedAt = new Date().toISOString();
+        const finalSteps: ManifestStepEntry[] = (finalStepRows.results ?? []).map((r) => ({
+          step_sequence: r.step_sequence,
+          step_name: r.step_name,
+          status: r.status as ManifestStepEntry["status"],
+          duration_ms: r.finished_at
+            ? new Date(r.finished_at).getTime() - new Date(r.started_at).getTime()
+            : 0,
+        }));
+        const finalManifest: ManifestPayload = {
+          schema: "v1",
+          run_id: runId,
+          tenant_id: params.tenant_id,
+          slug: params.slug,
+          issue_external_id: params.external_id,
+          attempt: params.attempt,
+          steps: finalSteps,
+          started_at: startedAt,
+          finished_at: finalFinishedAt,
+          token_usage: tokenUsage,
+          events_count: finalEventCountRow?.n ?? 0,
+        };
+        await writeManifest(this.env.ARTIFACTS, params, finalManifest);
+        await this.env.DB.prepare(
+          `UPDATE runs SET status = 'completed', finished_at = ?, token_usage_json = ? WHERE id = ?`,
+        )
+          .bind(finalFinishedAt, JSON.stringify(tokenUsage), runId)
+          .run();
+        return { finished_at: finalFinishedAt };
       };
-      await writeManifest(this.env.ARTIFACTS, params, finalManifest);
-
-      // Final runs row update.
-      await this.env.DB.prepare(
-        `UPDATE runs SET status = 'completed', finished_at = ?, token_usage_json = ? WHERE id = ?`,
-      )
-        .bind(finalFinishedAt, JSON.stringify(tokenUsage), runId)
-        .run();
+      const finalizeOptions = { retries: NO_RETRY } as Parameters<typeof step.do>[1];
+      await step.do(
+        "finalizeManifest",
+        finalizeOptions,
+        finalizeBody as Parameters<typeof step.do>[2],
+      );
     } catch (e) {
       const lastError = String((e as Error)?.message ?? e);
       await this.env.DB.prepare(

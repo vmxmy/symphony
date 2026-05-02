@@ -1,5 +1,9 @@
 # Phase 6/7 Implementation Plan: real WorkerHost workspace + codex_compat CodingAgent
 
+> **Superseded** by `docs/cloudflare-agent-native-phase6-plan.md` (Phase 6 implementation plan)
+> and a future `docs/cloudflare-agent-native-phase7-plan.md` (Phase 7 implementation plan).
+> This document is preserved for historical reference of the original Phase 6+7 combined draft.
+
 Author: planner pass, 2026-05-02
 Companion to: `docs/cloudflare-agent-native-phase1-plan.md`,
 `docs/cloudflare-agent-native-phase4-plan.md`,

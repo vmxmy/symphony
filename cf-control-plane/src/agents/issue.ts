@@ -260,6 +260,17 @@ export class IssueAgent extends DurableObject<Env> {
       attempt: current.attempt,
       workflow_instance_id: instanceId,
     };
+
+    // F-5 (Phase 6 PR-A R14): create the workflow BEFORE persisting the
+    // lease. If create() throws permanently and we had already written
+    // workflow_instance_id + status=running to DO storage, the agent would
+    // be stuck forever. Cloudflare Workflows .create() is idempotent on the
+    // same id, so queue redelivery / re-entrant startRun calls are safe to
+    // retry without leaking a second instance. The in-process Promise dedup
+    // map (startRunInFlight) still serializes concurrent callers to the
+    // same Promise.
+    await this.env.EXECUTION_WORKFLOW.create({ id: instanceId, params });
+
     const now = new Date().toISOString();
     const updated: IssueAgentState = {
       ...current,
@@ -269,12 +280,7 @@ export class IssueAgent extends DurableObject<Env> {
       decidedBy,
       reason,
     };
-
-    // Persist the lease before the external workflow side effect so any
-    // re-entrant startRun observes the in-progress run instead of creating a
-    // second workflow instance.
     await this.ctx.storage.put("state", updated);
-    await this.env.EXECUTION_WORKFLOW.create({ id: instanceId, params });
     return updated;
   }
 
