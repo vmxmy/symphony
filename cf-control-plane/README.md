@@ -96,6 +96,24 @@ The initial schema migration intentionally creates tables without
 the migration should fail loudly instead of silently accepting schema drift.
 Wrangler still tracks applied migration files in its bookkeeping table.
 
+## R2 + Workflows setup (Phase 5 one-shot)
+
+Phase 5 introduces the `EXECUTION_WORKFLOW` Cloudflare Workflow and the
+`ARTIFACTS` R2 bucket binding. First-time setup per environment:
+
+```bash
+# Create the R2 bucket (idempotent on rerun)
+wrangler r2 bucket create symphony-runs
+
+# wrangler deploy will register the ExecutionWorkflow class automatically
+# from the [[workflows]] binding in wrangler.toml.
+wrangler deploy
+```
+
+The bucket name `symphony-runs` matches the binding in wrangler.toml.
+Re-running `wrangler r2 bucket create` against an existing bucket is a
+no-op; safe to put in a setup script.
+
 ## Adding a migration
 
 ```bash
