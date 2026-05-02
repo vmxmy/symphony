@@ -152,6 +152,17 @@ describe("ProjectAgent retry mirror gate", () => {
     expect(result.decisions.some((decision) => decision.kind === "dispatch" && decision.issueId === issue.id)).toBe(false);
   });
 
+  test("empty retry due_at suppresses dispatch for failed informational rows", async () => {
+    const db = createMigratedDatabase();
+    seedTenantAndProfile(db);
+    const issue = makeIssue({ id: "linear-issue-empty-due", identifier: "SYM-EMPTY" });
+    seedRetry(db, issue, "", 5);
+
+    const result = await pollWithIssues(db, [issue]);
+
+    expect(result.decisions.some((decision) => decision.kind === "dispatch" && decision.issueId === issue.id)).toBe(false);
+  });
+
   test("past retry due_at dispatches with the next attempt", async () => {
     const db = createMigratedDatabase();
     seedTenantAndProfile(db);

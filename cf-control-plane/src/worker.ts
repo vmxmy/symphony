@@ -19,7 +19,7 @@ import { ProjectAgent } from "./agents/project.js";
 import { IssueAgent } from "./agents/issue.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard } from "./dashboard/render.js";
-import type { DashboardState, ProfileView, TenantView } from "./dashboard/render.js";
+import type { DashboardState, ProfileView, RetryView, TenantView } from "./dashboard/render.js";
 import {
   authenticateOperator,
   requireCapability,
@@ -197,7 +197,7 @@ async function readiness(env: Env): Promise<{ ready: boolean; db: { ok: boolean;
 }
 
 async function loadDashboardState(env: Env): Promise<DashboardState> {
-  const [tenants, profiles, runsRes, issuesRes] = await Promise.all([
+  const [tenants, profiles, runsRes, issuesRes, retriesRes] = await Promise.all([
     listTenants(env),
     listProfiles(env),
     env.DB.prepare(
@@ -219,6 +219,18 @@ async function loadDashboardState(env: Env): Promise<DashboardState> {
         ORDER BY i.last_seen_at DESC
         LIMIT 50`,
     ).all<NonNullable<DashboardState["issues"]>[number]>(),
+    env.DB.prepare(
+      `SELECT COALESCE(i.identifier, r.external_id) AS identifier,
+              CASE WHEN r.due_at IS NULL OR r.due_at = '' THEN 'failed' ELSE 'retry_wait' END AS status,
+              r.attempt, r.due_at, r.last_error
+         FROM issue_retries r
+         LEFT JOIN issues i ON i.id = r.issue_id
+        ORDER BY
+              CASE WHEN r.due_at IS NULL OR r.due_at = '' THEN 1 ELSE 0 END,
+              r.due_at ASC,
+              r.updated_at DESC
+        LIMIT 50`,
+    ).all<RetryView>(),
   ]);
 
   return {
@@ -227,6 +239,7 @@ async function loadDashboardState(env: Env): Promise<DashboardState> {
     profiles,
     runs: runsRes.results ?? [],
     issues: issuesRes.results ?? [],
+    retries: retriesRes.results ?? [],
   };
 }
 

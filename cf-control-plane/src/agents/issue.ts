@@ -76,12 +76,22 @@ export class IssueAgent extends DurableObject<Env> {
     return `${this.profileId(tenantId, slug)}:${externalId}`;
   }
 
+  // PR-D keeps failed issues visible in the retry mirror with due_at="".
+  // The upsert updates an existing retry row in place when one is present.
   private async putRetryMirror(state: IssueAgentState): Promise<void> {
     try {
       await this.env.DB.prepare(
-        `INSERT OR REPLACE INTO issue_retries (
+        `INSERT INTO issue_retries (
            issue_id, tenant_id, profile_id, external_id, attempt, due_at, last_error, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(issue_id) DO UPDATE SET
+           tenant_id = excluded.tenant_id,
+           profile_id = excluded.profile_id,
+           external_id = excluded.external_id,
+           attempt = excluded.attempt,
+           due_at = excluded.due_at,
+           last_error = excluded.last_error,
+           updated_at = excluded.updated_at`,
       )
         .bind(
           this.issueId(state.tenantId, state.slug, state.externalId),
@@ -235,11 +245,7 @@ export class IssueAgent extends DurableObject<Env> {
     await this.ctx.storage.put("state", updated);
     if (nextRetryMs !== undefined) await this.ctx.storage.setAlarm(nowMs + nextRetryMs);
 
-    if (target === "retry_wait") {
-      await this.putRetryMirror(updated);
-    } else {
-      await this.deleteRetryMirror(tenantId, slug, externalId);
-    }
+    await this.putRetryMirror(updated);
 
     return updated;
   }
@@ -319,7 +325,9 @@ export class IssueAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<IssueAgentState> {
-    return this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
+    const state = await this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
+    await this.deleteRetryMirror(tenantId, slug, externalId);
+    return state;
   }
 
   async cancel(

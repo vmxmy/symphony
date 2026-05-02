@@ -46,6 +46,14 @@ export type RunView = {
   token_usage_json?: string | null;
 };
 
+export type RetryView = {
+  identifier: string;
+  status: "retry_wait" | "failed";
+  attempt: number;
+  due_at?: string | null;
+  last_error?: string | null;
+};
+
 export type IssueView = {
   id: string;
   identifier: string;
@@ -62,6 +70,7 @@ export type DashboardState = {
   profiles: ProfileView[];
   runs?: RunView[];
   issues?: IssueView[];
+  retries?: RetryView[];
 };
 
 const ESCAPE_MAP: Record<string, string> = {
@@ -162,6 +171,7 @@ const DASHBOARD_CSS = `
   details code { display: inline-block; margin: 2px; padding: 1px 4px; background: #f0f0f2; border-radius: 3px; }
   .muted { color: #aaa; }
   .warn { color: #c44; }
+  .note { color: #555; line-height: 1.5; }
   .empty { color: #777; font-style: italic; }
   .status-active { color: #279847; font-weight: 600; }
   .status-paused { color: #b27000; font-weight: 600; }
@@ -176,6 +186,19 @@ const DASHBOARD_CSS = `
   footer { margin-top: 2rem; color: #888; font-size: 0.8rem; border-top: 1px solid #eee; padding-top: 0.5rem; display: flex; justify-content: space-between; }
   footer a { color: #555; }
 `;
+
+function formatDueAt(dueAt: string | null | undefined, nowIso: string): string {
+  if (!dueAt) return "—";
+  const dueMs = new Date(dueAt).getTime();
+  const nowMs = new Date(nowIso).getTime();
+  if (!Number.isFinite(dueMs) || !Number.isFinite(nowMs)) return "—";
+  const deltaMs = dueMs - nowMs;
+  if (deltaMs <= 0) return "due now";
+  if (deltaMs < 60_000) return `in ${Math.ceil(deltaMs / 1000)}s`;
+  if (deltaMs < 3_600_000) return `in ${Math.ceil(deltaMs / 60_000)}m`;
+  if (deltaMs < 86_400_000) return `in ${Math.ceil(deltaMs / 3_600_000)}h`;
+  return `in ${Math.ceil(deltaMs / 86_400_000)}d`;
+}
 
 function runsTable(runs: RunView[]): string {
   if (runs.length === 0) return `<p class="empty">No runs yet. POST /api/v1/projects/&lt;tenant&gt;/&lt;slug&gt;/issues/&lt;identifier&gt;/actions/mock-run to create one.</p>`;
@@ -203,6 +226,37 @@ function runsTable(runs: RunView[]): string {
     <table>
       <thead>
         <tr><th>id</th><th>issue</th><th>attempt</th><th>status</th><th>adapter</th><th>duration</th><th>tokens</th><th>started</th></tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function retriesTable(retries: RetryView[], generatedAt: string): string {
+  const note = `
+    <p class="note">
+      Operator actions stay on the Bearer-protected API:
+      Retry now <code>POST /api/v1/issues/:t/:s/:e/actions/retry-now</code> (Bearer);
+      Resume failed <code>POST /api/v1/issues/:t/:s/:e/actions/resume</code> (Bearer).
+    </p>`;
+  if (retries.length === 0) return `${note}<p class="empty">No retrying or failed issues.</p>`;
+  const rows = retries
+    .map((r) => {
+      const due = r.status === "failed" ? "—" : formatDueAt(r.due_at, generatedAt);
+      return `
+        <tr>
+          <td><code>${escape(r.identifier)}</code></td>
+          <td><span class="status-${escape(r.status)}">${escape(r.status)}</span></td>
+          <td>#${escape(r.attempt)}</td>
+          <td>${escape(due)}</td>
+          <td>${r.last_error ? escape(r.last_error) : `<span class="muted">-</span>`}</td>
+        </tr>`;
+    })
+    .join("");
+  return `
+    ${note}
+    <table>
+      <thead>
+        <tr><th>identifier</th><th>status</th><th>attempt</th><th>due</th><th>last_error</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
@@ -249,6 +303,7 @@ function safeParse<T>(raw: string | null): T | null {
 export function renderDashboard(state: DashboardState): string {
   const runs = state.runs ?? [];
   const issues = state.issues ?? [];
+  const retries = state.retries ?? [];
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -276,6 +331,11 @@ export function renderDashboard(state: DashboardState): string {
   <section>
     <h2>Issues (${issues.length})</h2>
     ${issuesTable(issues)}
+  </section>
+
+  <section>
+    <h2>Retries (${retries.length})</h2>
+    ${retriesTable(retries, state.generated_at)}
   </section>
 
   <section>

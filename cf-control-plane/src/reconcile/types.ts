@@ -32,8 +32,8 @@ export type RunningSession = {
 export type RetryEntry = {
   issueId: string;
   attempt: number;
-  /** ISO due_at; if in the past, the issue is eligible for re-dispatch. */
-  dueAt: string;
+  /** ISO due_at; if in the past, the issue is eligible for re-dispatch. Empty/null means not dispatchable. */
+  dueAt: string | null;
 };
 
 export type ReconcileInput = {

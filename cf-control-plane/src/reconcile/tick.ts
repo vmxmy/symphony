@@ -59,6 +59,9 @@ function dispatchableUnderConcurrency(
 }
 
 function isDueRetry(retry: RetryEntry, now: string): boolean {
+  // PR-D uses issue_retries rows with empty/null due_at as informational
+  // failed-state rows. They must never become dispatch decisions.
+  if (!retry.dueAt) return false;
   return retry.dueAt <= now;
 }
 

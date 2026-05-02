@@ -1130,6 +1130,13 @@ Exit criteria:
 - Retry/backoff behavior matches current `State.scheduleRetry` semantics.
 - Dashboard can show queued/running/retrying/paused/terminal issue state.
 
+Status sync (2026-05-02, Phase 4 sub-cut 3 PR-D):
+
+- IssueAgent ownership, dispatch queue ingestion, retry_wait/failed transitions, alarm-driven retry dispatch, and the D1 `issue_retries` mirror are implemented in `cf-control-plane`.
+- Failed-state visibility uses the existing `issue_retries` row with `due_at = ""`; reconcile treats empty/null due dates as informational and does not emit dispatch decisions.
+- The dashboard exposes retry_wait/failed rows read-only with CLI/curl Bearer endpoint hints. Session-cookie dashboard auth is not extended to mutation actions until Phase 8 ToolGatewayAgent and Access JWT validation.
+- Run lease / `workflow_instance_id` semantics remain part of Phase 5 ExecutionWorkflow integration; Phase 4 still does not start coding workloads.
+
 ### Phase 5: ExecutionWorkflow without real coding
 
 Goal: prove durable workflow orchestration with a mock agent.
