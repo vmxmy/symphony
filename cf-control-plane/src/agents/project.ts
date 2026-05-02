@@ -258,6 +258,20 @@ export class ProjectAgent extends DurableObject<Env> {
       .all<{ identifier: string }>();
     const aliveIdentifiers = new Set((aliveRows.results ?? []).map((r) => r.identifier));
 
+    // Phase 4 sub-cut 3 PR-B (docs/cloudflare-agent-native-phase4-plan.md §4 Step 5):
+    // feed reconcileTick from the D1 retry mirror. IssueAgent DO storage stays
+    // the source of truth; an empty mirror preserves the previous no-retry path.
+    const retryRows = await this.env.DB.prepare(
+      `SELECT issue_id, attempt, due_at FROM issue_retries WHERE profile_id = ?`,
+    )
+      .bind(profileRow.id)
+      .all<{ issue_id: string; attempt: number; due_at: string }>();
+    const retries = (retryRows.results ?? []).map((row) => ({
+      issueId: row.issue_id,
+      attempt: row.attempt,
+      dueAt: row.due_at,
+    }));
+
     const agentCfg = (config.agent as Record<string, unknown> | undefined) ?? {};
     const input: ReconcileInput = {
       cfg: {
@@ -284,7 +298,7 @@ export class ProjectAgent extends DurableObject<Env> {
       terminal,
       byIdLookup: {},
       running: [],
-      retries: [],
+      retries,
       workspaceExists: (issue) => aliveIdentifiers.has(issue.identifier),
       now,
     };
