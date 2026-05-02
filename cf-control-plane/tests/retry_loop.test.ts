@@ -215,13 +215,20 @@ describe("retry loop", () => {
       lastError: "synthetic failure 3",
     });
     expect(failed.nextRetryAt).toBeUndefined();
-    expect(retryRows(harness.db)).toHaveLength(0);
+    expect(retryRows(harness.db)).toHaveLength(1);
+    expect(retryRows(harness.db)[0]).toMatchObject({
+      issue_id: `${IDS.tenantId}/${IDS.slug}:${IDS.externalId}`,
+      attempt: 3,
+      due_at: "",
+      last_error: "synthetic failure 3",
+    });
     expect(harness.alarmTimestamps).toHaveLength(2);
     expect(harness.pendingAlarm()).toBeUndefined();
 
     const resumed = await harness.agent.resume(IDS.tenantId, IDS.slug, IDS.externalId, "operator", "resume-failed");
     expect(resumed.status).toBe("queued");
     expect(resumed.attempt).toBe(3);
+    expect(retryRows(harness.db)).toHaveLength(0);
     expect(harness.deleteAlarmCalls()).toBe(0);
   });
 });

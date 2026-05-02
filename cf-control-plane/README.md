@@ -40,6 +40,14 @@ Phase 3 (tracker adapter bridge):
 - [x] Queue-based tracker event ingestion (commit f185bf7).
 - [x] `POST /api/v1/projects/:tenant/:slug/actions/refresh` compatibility route (commit 4b1c0aa).
 
+Phase 4 (IssueAgent dispatch and retry/backoff):
+
+- [x] IssueAgent durable per-issue state machine with queued, paused, cancelled, retry_wait, and failed states.
+- [x] Dispatch queue consumer routes tracker decisions into IssueAgent without starting coding workloads.
+- [x] D1 `issue_retries` mirror gates reconcile dispatches until retry due time.
+- [x] Failed issues stay visible as `issue_retries` rows with empty `due_at`; reconcile treats empty due dates as not due.
+- [x] Dashboard renders a read-only Retries section; operator retry/resume actions remain Bearer-only API calls for CLI/curl.
+
 ## Layout
 
 ```

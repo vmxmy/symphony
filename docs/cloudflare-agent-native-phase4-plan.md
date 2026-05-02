@@ -247,7 +247,8 @@ Phase 5 enters).
 
 **PR-D — Dashboard surface + docs sync**
 - Step 8 + sync README/target/phase4-plan checkboxes.
-- Independent visual change; depends on PR-A for state union.
+- Read-only retry/failed row visibility; depends on PR-A for state union
+  and PR-B/PR-C for the D1 retry mirror.
 
 Optional: each PR ships with `make all` green and a small **manual probe
 script** (`scripts/probe-retry.ts`) that operators can run against the
@@ -255,24 +256,24 @@ deployed Worker. Probe scripts go in PR-D.
 
 ## 6. File-Level Checklist
 
-- [ ] `cf-control-plane/src/agents/backoff.ts` — new
-- [ ] `cf-control-plane/src/agents/issue.ts` — extended (R2, R4)
-- [ ] `cf-control-plane/src/queues/types.ts` — `IssueDispatchMessage` v2
-- [ ] `cf-control-plane/src/queues/handlers.ts` — failure injection branch
-- [ ] `cf-control-plane/src/reconcile/tick.ts` — already correct, no change
-- [ ] `cf-control-plane/src/agents/project.ts` — load retries from D1 before tick
-- [ ] `cf-control-plane/src/worker.ts` — 2 new routes
-- [ ] `cf-control-plane/src/dashboard/render.ts` — 2 new state cells
-- [ ] `cf-control-plane/migrations/0003_issue_retries.sql` — new
-- [ ] `cf-control-plane/wrangler.toml` — register migration tag v3 if needed
+- [x] `cf-control-plane/src/agents/backoff.ts` — new
+- [x] `cf-control-plane/src/agents/issue.ts` — extended (R2, R4); PR-D retains failed rows with empty `due_at`
+- [x] `cf-control-plane/src/queues/types.ts` — `IssueDispatchMessage` v2
+- [x] `cf-control-plane/src/queues/handlers.ts` — failure injection branch
+- [x] `cf-control-plane/src/reconcile/tick.ts` — skips empty/null `due_at` failed rows
+- [x] `cf-control-plane/src/agents/project.ts` — load retries from D1 before tick
+- [x] `cf-control-plane/src/worker.ts` — operator routes plus dashboard retry-row query
+- [x] `cf-control-plane/src/dashboard/render.ts` — read-only Retries section
+- [x] `cf-control-plane/migrations/0003_issue_retries.sql` — new
+- [x] `cf-control-plane/wrangler.toml` — register migration tag v3 if needed
       (only if a new sqlite class is added — for sub-cut 3 it isn't)
-- [ ] `cf-control-plane/tests/backoff.test.ts` — new
-- [ ] `cf-control-plane/tests/issue_agent.test.ts` — new
-- [ ] `cf-control-plane/tests/retry_loop.test.ts` — new
-- [ ] `cf-control-plane/tests/reconcile_retry_gate.test.ts` — new
-- [ ] `cf-control-plane/README.md` — Phase 4 sub-cut 3 status row
-- [ ] `docs/cloudflare-agent-native-target.md` §1115–1131 status sync
-- [ ] `docs/cloudflare-agent-native-phase4-plan.md` — this file
+- [x] `cf-control-plane/tests/backoff.test.ts` — new
+- [x] `cf-control-plane/tests/issue_agent.test.ts` — new
+- [x] `cf-control-plane/tests/retry_loop.test.ts` — new
+- [x] `cf-control-plane/tests/reconcile_retry_gate.test.ts` — new
+- [x] `cf-control-plane/README.md` — Phase 4 sub-cut 3 status row
+- [x] `docs/cloudflare-agent-native-target.md` §1115–1131 status sync
+- [x] `docs/cloudflare-agent-native-phase4-plan.md` — this file
 
 ## 7. Acceptance Criteria
 
@@ -292,8 +293,8 @@ A3. Retry loop e2e: `admin/inject-failure` on a queued issue causes:
 
 A4. Max-attempt termination: after 5 consecutive failures
 (default `maxAttempts=5`, configurable), state lands in `failed`,
-no alarm is set, `issue_retries` is deleted, dashboard shows the row
-with last_error and Resume CTA.
+no alarm is set, `issue_retries` is retained with `due_at = ""`, and the
+dashboard shows the row with last_error and no mutation button.
 
 A5. Operator force-retry: `POST /actions/retry-now` on a `retry_wait` row
 clears alarm, transitions to queued, enqueues IssueDispatchMessage with
@@ -301,11 +302,13 @@ attempt unchanged.
 
 A6. Operator resume of failed: `POST /actions/resume` on a `failed` row
 transitions to queued, attempt counter NOT reset (so a flaky issue that
-fails again immediately doesn't get N more attempts at the cheapest backoff).
+fails again immediately doesn't get N more attempts at the cheapest backoff),
+and clears the informational retry mirror row.
 
 A7. Reconcile harness: when D1 `issue_retries.due_at > now` for an issue,
 the `dispatch` decision is **not** emitted; when due_at <= now, decision
-fires with `attempt = prev + 1`.
+fires with `attempt = prev + 1`. Empty/null `due_at` values represent
+failed informational rows and also suppress dispatch.
 
 A8. Cancellation race: alarm fires while issue is `cancelled` → no enqueue,
 no transition; `issue_retries` row removed defensively.
@@ -314,7 +317,7 @@ A9. Phase 4 invariant audit: no new code references `runs`, `run_steps`,
 `run_events`, `workflow_instance_id`, or `agent_state` on `D1.issues`.
 Add a grep gate to `bun test` to enforce this.
 
-A10. `bun test` green; `bunx tsc --noEmit` clean; `make all` green.
+A10. `bun test` green; `bunx tsc --noEmit` clean; `bun run db:migrate:local` applies.
 
 ## 8. Verification Matrix
 
@@ -323,9 +326,9 @@ A10. `bun test` green; `bunx tsc --noEmit` clean; `make all` green.
 | Backoff math parity | `tests/backoff.test.ts` parity table | All 20 entries match |
 | State machine transitions | `tests/issue_agent.test.ts` | Every R2 edge tested |
 | Alarm-driven re-dispatch | `tests/retry_loop.test.ts` (in-memory ctx mock) | Mock alarm fires, queue records send |
-| Retry due gate | `tests/reconcile_retry_gate.test.ts` | Decision absent when due_at in future |
-| Operator routes | bun test + manual `scripts/probe-retry.ts` | Status response shows expected state |
-| Dashboard render | manual screenshot of `/dashboard` | retry_wait countdown visible |
+| Retry due gate | `tests/reconcile_retry_gate.test.ts` | Decision absent when due_at is future or empty |
+| Operator routes | bun test + manual CLI/curl | Status response shows expected state |
+| Dashboard render | manual screenshot of `/dashboard` | retry_wait countdown and failed informational rows visible |
 | Phase 4 invariant | grep gate in test runner | No banned tokens |
 | Live e2e (optional) | Deploy + admin/inject-failure | DispatchMessage observed within backoff window |
 
@@ -399,7 +402,16 @@ surface for Phase 5.
 S-5. If migration v3 cannot be applied to the live D1 without downtime
 (it shouldn't — it's a CREATE TABLE only), **stop** and re-evaluate.
 
-## 11. Phase 5 Readiness Gates
+## 11. Follow-ups
+
+Phase 8 auth-model gap: PR-D keeps the dashboard read path on the existing
+session-cookie flow but does not expand that cookie into mutation authority.
+The decision is rows-only visibility: dashboard renders retry_wait/failed
+rows informationally, while retry-now and failed-resume actions remain
+Bearer-only CLI/curl calls until Phase 8 ToolGatewayAgent and proper
+Cloudflare Access JWT validation extend the operator auth surface.
+
+### Phase 5 Readiness Gates
 
 Phase 5 (`ExecutionWorkflow without real coding`, target.md §1133) can
 start when:

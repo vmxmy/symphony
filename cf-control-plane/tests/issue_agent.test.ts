@@ -267,7 +267,13 @@ describe("IssueAgent retry loop entrypoints", () => {
     expect(failed.attempt).toBe(2);
     expect(failed.nextRetryAt).toBeUndefined();
     expect(alarmTimestamps).toHaveLength(1);
-    expect(retryRows(db)).toHaveLength(0);
+    expect(retryRows(db)).toHaveLength(1);
+    expect(retryRows(db)[0]).toMatchObject({
+      issue_id: `${IDS.tenantId}/${IDS.slug}:${IDS.externalId}`,
+      attempt: 2,
+      due_at: "",
+      last_error: "second",
+    });
   });
 
   test("markFailed throws deterministic error outside queued", async () => {
