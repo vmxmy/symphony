@@ -604,6 +604,44 @@ export default {
         }
       }
 
+      const issueRetryNow = url.pathname.match(
+        /^\/api\/v1\/issues\/([^/]+)\/([^/]+)\/([^/]+)\/actions\/retry-now$/,
+      );
+      if (issueRetryNow) {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:issue.transition");
+        if (denied) return denied;
+        const [, tenantId, slug, externalId] = issueRetryNow;
+        try {
+          const stub = issueAgentFor(env, tenantId!, slug!, externalId!);
+          const state = await stub.retryNow(
+            tenantId!,
+            slug!,
+            externalId!,
+            principal.subject,
+            "operator-retry-now",
+          );
+          const message: IssueDispatchMessage = {
+            kind: "issue.dispatch",
+            version: 1,
+            tenant_id: tenantId!,
+            slug: slug!,
+            external_id: externalId!,
+            identifier: externalId!,
+            attempt: state.attempt,
+            scheduled_at: new Date().toISOString(),
+          };
+          await env.DISPATCH.send(message);
+          return jsonResponse({ state });
+        } catch (e) {
+          const msg = String((e as Error).message);
+          return jsonResponse(
+            { error: "issue_retry_now_rejected", message: msg },
+            { status: msg.startsWith("issue_retrynow_invalid_state") ? 400 : 409 },
+          );
+        }
+      }
+
       const issueAction = url.pathname.match(
         /^\/api\/v1\/issues\/([^/]+)\/([^/]+)\/([^/]+)\/actions\/(dispatch|pause|resume|cancel)$/,
       );
@@ -683,6 +721,74 @@ export default {
         };
         await env.DISPATCH.send(message);
         return jsonResponse({ enqueued: true, message });
+      }
+
+      // ---- admin: enqueue a synthetic issue failure (Phase 4 PR-C test seam) ----
+      // Body: { tenant_id, slug, external_id, error?, attempt? }
+      if (url.pathname === "/api/v1/admin/inject-failure") {
+        if (req.method !== "POST") return methodNotAllowed(["POST"]);
+        const denied = requireCapability(principal, "write:issue.transition");
+        if (denied) return denied;
+        let body: {
+          tenant_id?: unknown;
+          slug?: unknown;
+          external_id?: unknown;
+          error?: unknown;
+          attempt?: unknown;
+        } = {};
+        try {
+          body = (await req.json()) as typeof body;
+        } catch {
+          return jsonResponse({ error: "bad_json" }, { status: 400 });
+        }
+        if (
+          typeof body.tenant_id !== "string" ||
+          typeof body.slug !== "string" ||
+          typeof body.external_id !== "string"
+        ) {
+          return jsonResponse(
+            { error: "missing_fields", required: ["tenant_id", "slug", "external_id"] },
+            { status: 400 },
+          );
+        }
+        try {
+          assertControlPlaneId("tenant", body.tenant_id);
+          assertControlPlaneId("profile", body.slug);
+          assertControlPlaneId("issue", body.external_id);
+        } catch (e) {
+          return jsonResponse({ error: "invalid_issue_id", message: String((e as Error).message) }, { status: 400 });
+        }
+        const attempt =
+          typeof body.attempt === "number" && Number.isFinite(body.attempt) ?
+            body.attempt
+          : 1;
+        const message: IssueDispatchMessage = {
+          kind: "issue.dispatch",
+          version: 2,
+          tenant_id: body.tenant_id,
+          slug: body.slug,
+          external_id: body.external_id,
+          identifier: body.external_id,
+          attempt,
+          scheduled_at: new Date().toISOString(),
+          inject_failure: true,
+          error: typeof body.error === "string" ? body.error : undefined,
+        };
+        await env.DISPATCH.send(message);
+        return jsonResponse(
+          {
+            enqueued: true,
+            message: {
+              kind: message.kind,
+              version: message.version,
+              tenant_id: message.tenant_id,
+              slug: message.slug,
+              external_id: message.external_id,
+              attempt: message.attempt,
+            },
+          },
+          { status: 202 },
+        );
       }
     }
 

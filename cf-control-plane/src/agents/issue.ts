@@ -17,12 +17,14 @@
 // wait until Phase 5 when we have run lifecycle to mirror. Dashboard
 // reads agent state per-issue via a Worker route that calls getStatus.
 //
-// Phase 4 sub-cut 3 PR-A adds only the retry_wait + failed state machine
-// surface. The alarm handler, markFailed/retryNow entrypoints, and any run
-// lease (workflow_instance_id) remain out of scope until PR-C / Phase 5.
+// Phase 4 sub-cut 3 PR-C adds markFailed + retryNow + alarm-driven
+// re-dispatch + D1 issue_retries mirror writes. The run lease
+// (workflow_instance_id) remains out of scope until Phase 5.
 
 import { DurableObject } from "cloudflare:workers";
+import { nextBackoffMs } from "./backoff.js";
 import { assertControlPlaneId } from "../identity.js";
+import type { IssueDispatchMessage } from "../queues/types.js";
 
 export type IssueAgentStatus =
   | "discovered"
@@ -51,7 +53,9 @@ export type IssueAgentState = {
 };
 
 type Env = {
+  DB: D1Database;
   ISSUE_AGENT: DurableObjectNamespace;
+  DISPATCH: Queue<IssueDispatchMessage>;
 };
 
 const ALLOWED_TRANSITIONS: Record<IssueAgentStatus, IssueAgentStatus[]> = {
@@ -59,12 +63,56 @@ const ALLOWED_TRANSITIONS: Record<IssueAgentStatus, IssueAgentStatus[]> = {
   queued: ["paused", "cancelled", "retry_wait", "failed"],
   paused: ["queued", "cancelled"],
   cancelled: [], // terminal
-  // Phase 4 sub-cut 3 PR-A: table-only extension; alarm re-dispatch lands in PR-C.
   retry_wait: ["queued", "paused", "cancelled"],
   failed: ["queued", "cancelled"],
 };
 
 export class IssueAgent extends DurableObject<Env> {
+  private profileId(tenantId: string, slug: string): string {
+    return `${tenantId}/${slug}`;
+  }
+
+  private issueId(tenantId: string, slug: string, externalId: string): string {
+    return `${this.profileId(tenantId, slug)}:${externalId}`;
+  }
+
+  private async putRetryMirror(state: IssueAgentState): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        `INSERT OR REPLACE INTO issue_retries (
+           issue_id, tenant_id, profile_id, external_id, attempt, due_at, last_error, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          this.issueId(state.tenantId, state.slug, state.externalId),
+          state.tenantId,
+          this.profileId(state.tenantId, state.slug),
+          state.externalId,
+          state.attempt,
+          state.nextRetryAt ?? "",
+          state.lastError ?? null,
+          state.updatedAt,
+        )
+        .run();
+    } catch (e) {
+      console.warn(
+        `[IssueAgent] issue_retries write failed for ${state.issueKey}: ${String((e as Error)?.message ?? e)}`,
+      );
+    }
+  }
+
+  private async deleteRetryMirror(tenantId: string, slug: string, externalId: string): Promise<void> {
+    try {
+      await this.env.DB.prepare("DELETE FROM issue_retries WHERE issue_id = ?")
+        .bind(this.issueId(tenantId, slug, externalId))
+        .run();
+    } catch (e) {
+      console.warn(
+        `[IssueAgent] issue_retries delete failed for ${tenantId}:${slug}:${externalId}: ${String((e as Error)?.message ?? e)}`,
+      );
+    }
+  }
+
   private async loadOrInit(
     tenantId: string,
     slug: string,
@@ -127,6 +175,7 @@ export class IssueAgent extends DurableObject<Env> {
       reason,
       dispatchCount:
         next === "queued" ? current.dispatchCount + 1 : current.dispatchCount,
+      nextRetryAt: next === "retry_wait" ? current.nextRetryAt : undefined,
     };
     await this.ctx.storage.put("state", updated);
     return updated;
@@ -139,7 +188,118 @@ export class IssueAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<IssueAgentState> {
+    const state = await this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
+    await this.deleteRetryMirror(tenantId, slug, externalId);
+    return state;
+  }
+
+  async markFailed(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    error: string,
+    opts: { maxAttempts?: number; baseMs?: number; maxBackoffMs?: number } = {},
+  ): Promise<IssueAgentState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    assertControlPlaneId("issue", externalId);
+
+    const current = await this.loadOrInit(tenantId, slug, externalId);
+    if (current.status !== "queued") {
+      throw new Error(`issue_markfailed_invalid_state: ${current.status}`);
+    }
+
+    const nextAttempt = current.attempt + 1;
+    const maxAttempts = opts.maxAttempts ?? 5;
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const target: IssueAgentStatus = nextAttempt < maxAttempts ? "retry_wait" : "failed";
+    const nextRetryMs =
+      target === "retry_wait" ?
+        nextBackoffMs(nextAttempt, opts.maxBackoffMs ?? 300_000, opts.baseMs ?? 1000)
+      : undefined;
+    const nextRetryAt =
+      nextRetryMs !== undefined ? new Date(nowMs + nextRetryMs).toISOString() : undefined;
+
+    const updated: IssueAgentState = {
+      ...current,
+      status: target,
+      attempt: nextAttempt,
+      lastError: error,
+      nextRetryAt,
+      updatedAt: now,
+      decidedBy: "issue-agent",
+      reason: target === "retry_wait" ? "retry-scheduled" : "max-attempts-exhausted",
+    };
+
+    await this.ctx.storage.put("state", updated);
+    if (nextRetryMs !== undefined) await this.ctx.storage.setAlarm(nowMs + nextRetryMs);
+
+    if (target === "retry_wait") {
+      await this.putRetryMirror(updated);
+    } else {
+      await this.deleteRetryMirror(tenantId, slug, externalId);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Force a retrying issue back to queued immediately.
+   *
+   * This method intentionally does NOT enqueue an IssueDispatchMessage. The
+   * caller owns dispatching the next attempt (the operator route sends one);
+   * the Durable Object alarm path enqueues directly inside alarm().
+   */
+  async retryNow(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    decidedBy?: string,
+    reason?: string,
+  ): Promise<IssueAgentState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    assertControlPlaneId("issue", externalId);
+
+    const current = await this.loadOrInit(tenantId, slug, externalId);
+    if (current.status !== "retry_wait") {
+      throw new Error(`issue_retrynow_invalid_state: ${current.status}`);
+    }
+
+    await this.ctx.storage.deleteAlarm();
+    await this.deleteRetryMirror(tenantId, slug, externalId);
     return this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
+  }
+
+  async alarm(): Promise<void> {
+    const state = await this.ctx.storage.get<IssueAgentState>("state");
+    if (!state || state.status !== "retry_wait") return;
+
+    assertControlPlaneId("tenant", state.tenantId);
+    assertControlPlaneId("profile", state.slug);
+    assertControlPlaneId("issue", state.externalId);
+
+    const message: IssueDispatchMessage = {
+      kind: "issue.dispatch",
+      version: 1,
+      tenant_id: state.tenantId,
+      slug: state.slug,
+      external_id: state.externalId,
+      identifier: state.externalId,
+      attempt: state.attempt,
+      scheduled_at: new Date().toISOString(),
+    };
+    await this.env.DISPATCH.send(message);
+    await this.deleteRetryMirror(state.tenantId, state.slug, state.externalId);
+    await this.transition(
+      state.tenantId,
+      state.slug,
+      state.externalId,
+      "queued",
+      "issue-agent-alarm",
+      `attempt=${state.attempt}`,
+    );
   }
 
   async pause(
