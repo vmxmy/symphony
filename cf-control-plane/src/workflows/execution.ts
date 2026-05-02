@@ -33,6 +33,12 @@ import {
   type ManifestStepEntry,
   writeManifest,
 } from "../runs/manifest.js";
+import { parseRuntimeConfig, pickWorkerHost } from "../runtime/factory.js";
+import type {
+  AssetBundleRef,
+  WorkspaceHandle,
+  WorkspaceRef,
+} from "../runtime/worker_host.js";
 
 export type ExecutionWorkflowParams = {
   tenant_id: string;
@@ -47,6 +53,8 @@ type Env = {
   DB: D1Database;
   ARTIFACTS: R2Bucket;
   ISSUE_AGENT: DurableObjectNamespace;
+  VPS_BRIDGE_BASE_URL?: string;
+  VPS_BRIDGE_TOKEN?: string;
 };
 
 type StepRetries = {
@@ -219,17 +227,17 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
 
     try {
       // Step 1: loadProfileAndIssue
-      await recordStep(this.env, runId, 1, "loadProfileAndIssue", step, async () => {
+      const loaded = await recordStep(this.env, runId, 1, "loadProfileAndIssue", step, async () => {
         const issueRow = await this.env.DB.prepare(
           `SELECT id, identifier, title FROM issues WHERE id = ?`,
         )
           .bind(issueId)
           .first<{ id: string; identifier: string; title: string | null }>();
         const profileRow = await this.env.DB.prepare(
-          `SELECT id, slug FROM profiles WHERE id = ?`,
+          `SELECT id, slug, config_json FROM profiles WHERE id = ?`,
         )
           .bind(`${params.tenant_id}/${params.slug}`)
-          .first<{ id: string; slug: string }>();
+          .first<{ id: string; slug: string; config_json: string | null }>();
         return {
           result: { issue: issueRow, profile: profileRow },
           eventDetail: {
@@ -238,6 +246,15 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
           },
         };
       });
+
+      // Resolve the profile slug + WorkerHost for steps 3-4. The factory is
+      // the single dispatch point per ADR-0001; execution.ts must not branch
+      // on WorkerHostKind. parseRuntimeConfig falls back to "mock" when the
+      // profile is missing or config_json is empty / unparseable.
+      const profileSlug = loaded.profile?.slug ?? params.slug;
+      const runtimeConfig = parseRuntimeConfig(loaded.profile?.config_json ?? null);
+      const workerHost = pickWorkerHost(this.env, runtimeConfig);
+      let workspaceHandle: WorkspaceHandle;
 
       // Step 2: acquireLease — IssueAgent confirms our workflow_instance_id
       // owns the lease. Conflict here is fatal: the next attempt is a new
@@ -271,16 +288,47 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
         NO_RETRY,
       );
 
-      // Steps 3-7: Phase 5 mock no-ops. Each step records its boundary
+      // Step 3: prepareWorkspace — delegate to the WorkerHost picked above.
+      // The full handle is returned as the step result so Workflows replay
+      // can restore workspaceHandle from the cached step.do() value without
+      // re-executing prepareWorkspace's body.
+      workspaceHandle = await recordStep(
+        this.env,
+        runId,
+        3,
+        "prepareWorkspace",
+        step,
+        async () => {
+          const ref: WorkspaceRef = {
+            tenant: params.tenant_id,
+            profile: profileSlug,
+            issue: params.external_id,
+          };
+          const handle = await workerHost.prepareWorkspace(ref);
+          return {
+            result: handle,
+            eventDetail: { handle_id: handle.id, substrate: handle.substrate },
+          };
+        },
+      );
+
+      // Step 4: materializeAssets — content-addressed bundle hash derived
+      // from (tenant, profile, issue, attempt) so replay produces the same
+      // hash and adapters (MockWorkerHost cache, VpsDockerHost server-side)
+      // treat the call as idempotent.
+      const bundle: AssetBundleRef = {
+        hash: `mock-${params.tenant_id}-${profileSlug}-${params.external_id}-${params.attempt}`,
+      };
+      await recordStep(this.env, runId, 4, "materializeAssets", step, async () => {
+        await workerHost.materializeAssets(workspaceHandle, bundle);
+        return {
+          result: { handle_id: workspaceHandle.id, bundle_hash: bundle.hash },
+          eventDetail: { handle_id: workspaceHandle.id, bundle_hash: bundle.hash },
+        };
+      });
+
+      // Steps 5-7: Phase 5 mock no-ops. Each step records its boundary
       // event so dashboards see the canonical 16-step shape.
-      await recordStep(this.env, runId, 3, "prepareWorkspace", step, async () => ({
-        result: { mock: true },
-        eventDetail: { mock: true, note: "phase 5 mock; phase 6 wires real WorkerHost" },
-      }));
-      await recordStep(this.env, runId, 4, "materializeAssets", step, async () => ({
-        result: { mock: true },
-        eventDetail: { mock: true, note: "phase 5 mock; phase 6 materializes real bundle" },
-      }));
       await recordStep(this.env, runId, 5, "afterCreateHook", step, async () => ({
         result: { mock: true, skipped: true },
         eventDetail: { mock: true, skipped: "no after_create hook in mock profile" },
