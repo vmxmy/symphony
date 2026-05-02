@@ -16,6 +16,7 @@ class MockDurableObject {
 
 mock.module("cloudflare:workers", () => ({
   DurableObject: MockDurableObject,
+  WorkflowEntrypoint: class { constructor(_c: unknown, env: unknown) { (this as any).env = env; } },
 }));
 
 const { IssueAgent } = await import("../src/agents/issue.js");
