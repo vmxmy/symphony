@@ -234,9 +234,9 @@ function runsTable(runs: RunView[]): string {
 function retriesTable(retries: RetryView[], generatedAt: string): string {
   const note = `
     <p class="note">
-      Operator actions stay on the Bearer-protected API:
-      Retry now <code>POST /api/v1/issues/:t/:s/:e/actions/retry-now</code> (Bearer);
-      Resume failed <code>POST /api/v1/issues/:t/:s/:e/actions/resume</code> (Bearer).
+      Operator actions stay on the Bearer-protected API for CLI/curl:
+      Retry now: <code>POST /api/v1/issues/:t/:s/:e/actions/retry-now</code> (Bearer);
+      Resume failed: <code>POST /api/v1/issues/:t/:s/:e/actions/resume</code> (Bearer).
     </p>`;
   if (retries.length === 0) return `${note}<p class="empty">No retrying or failed issues.</p>`;
   const rows = retries
@@ -256,7 +256,7 @@ function retriesTable(retries: RetryView[], generatedAt: string): string {
     ${note}
     <table>
       <thead>
-        <tr><th>identifier</th><th>status</th><th>attempt</th><th>due</th><th>last_error</th></tr>
+        <tr><th>identifier</th><th>status</th><th>attempt</th><th>due countdown</th><th>last_error</th></tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`;
