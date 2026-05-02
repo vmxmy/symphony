@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import type { IssueAgentState, IssueAgentStatus } from "../src/agents/issue.js";
 import type { IssueDispatchMessage } from "../src/queues/types.js";
+import type { ExecutionWorkflowParams } from "../src/workflows/execution.js";
 import { asD1, createMigratedDatabase } from "./support/sqlite_d1.js";
 
 class MockDurableObject {
@@ -32,15 +33,19 @@ const STATUSES = [
   "cancelled",
   "retry_wait",
   "failed",
+  "running",
+  "completed",
 ] as const satisfies readonly IssueAgentStatus[];
 
 const LEGAL_TRANSITIONS = {
   discovered: ["queued", "cancelled"],
-  queued: ["paused", "cancelled", "retry_wait", "failed"],
+  queued: ["paused", "cancelled", "retry_wait", "failed", "running"],
   paused: ["queued", "cancelled"],
   cancelled: [],
   retry_wait: ["queued", "paused", "cancelled"],
   failed: ["queued", "cancelled"],
+  running: ["queued", "retry_wait", "failed", "cancelled", "completed"],
+  completed: [],
 } as const satisfies Record<IssueAgentStatus, readonly IssueAgentStatus[]>;
 
 type TestStorage = {
@@ -115,6 +120,48 @@ function queueRecorder() {
   };
 }
 
+class MockWorkflowInstance implements WorkflowInstance {
+  constructor(public id: string) {}
+
+  async pause(): Promise<void> {}
+
+  async resume(): Promise<void> {}
+
+  async terminate(): Promise<void> {}
+
+  async restart(): Promise<void> {}
+
+  async status(): Promise<InstanceStatus> {
+    return { status: "running" };
+  }
+
+  async sendEvent(_event: { type: string; payload: unknown }): Promise<void> {}
+}
+
+type WorkflowCreateRecord = {
+  id?: string;
+  params?: ExecutionWorkflowParams;
+};
+
+function workflowRecorder() {
+  const creates: WorkflowCreateRecord[] = [];
+  const workflow = {
+    async get(id: string) {
+      return new MockWorkflowInstance(id);
+    },
+    async create(options?: WorkflowInstanceCreateOptions<ExecutionWorkflowParams>) {
+      creates.push({ id: options?.id, params: options?.params });
+      return new MockWorkflowInstance(options?.id ?? "generated");
+    },
+    async createBatch(batch: WorkflowInstanceCreateOptions<ExecutionWorkflowParams>[]) {
+      for (const options of batch) creates.push({ id: options.id, params: options.params });
+      return batch.map((options) => new MockWorkflowInstance(options.id ?? "generated"));
+    },
+  } satisfies Workflow<ExecutionWorkflowParams>;
+
+  return { workflow, creates };
+}
+
 function retryRows(db: ReturnType<typeof createMigratedDatabase>) {
   return db.query("SELECT issue_id, attempt, due_at, last_error FROM issue_retries ORDER BY issue_id").all() as Array<{
     issue_id: string;
@@ -131,15 +178,18 @@ function makeAgent(initial?: IssueAgentState, options: { db?: ReturnType<typeof 
   deleteAlarmCalls: () => number;
   db: ReturnType<typeof createMigratedDatabase>;
   sentMessages: IssueDispatchMessage[];
+  workflowCreates: WorkflowCreateRecord[];
 } {
   const { storage, readState, alarmTimestamps, deleteAlarmCalls } = makeStorage(initial);
   const ctx = { storage } as DurableObjectState;
   const db = options.db ?? createMigratedDatabase();
   const { messages, queue } = queueRecorder();
+  const { workflow, creates } = workflowRecorder();
   const env = {
     DB: asD1(db),
     DISPATCH: queue,
     ISSUE_AGENT: {} as DurableObjectNamespace,
+    EXECUTION_WORKFLOW: workflow,
   };
   return {
     agent: new IssueAgent(ctx, env),
@@ -148,6 +198,7 @@ function makeAgent(initial?: IssueAgentState, options: { db?: ReturnType<typeof 
     deleteAlarmCalls,
     db,
     sentMessages: messages,
+    workflowCreates: creates,
   };
 }
 
@@ -224,6 +275,127 @@ describe("IssueAgent state machine", () => {
     expect(state.status).toBe("queued");
     expect(state.attempt).toBe(4);
     expect(readState()?.attempt).toBe(4);
+  });
+});
+
+describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
+  test("startRun from queued creates one workflow and enters running", async () => {
+    const { agent, readState, workflowCreates } = makeAgent(makeState("queued"));
+
+    const state = await agent.startRun(IDS.tenantId, IDS.slug, IDS.externalId, "scheduled-poll", "attempt=0");
+
+    expect(state.status).toBe("running");
+    expect(state.workflow_instance_id).toBe("run:tenant:profile:issue-1:0");
+    expect(readState()).toMatchObject({
+      status: "running",
+      workflow_instance_id: "run:tenant:profile:issue-1:0",
+    });
+    expect(workflowCreates).toEqual([
+      {
+        id: "run:tenant:profile:issue-1:0",
+        params: {
+          tenant_id: IDS.tenantId,
+          slug: IDS.slug,
+          external_id: IDS.externalId,
+          identifier: IDS.externalId,
+          attempt: 0,
+          workflow_instance_id: "run:tenant:profile:issue-1:0",
+        },
+      },
+    ]);
+  });
+
+  test("startRun is idempotent while already running", async () => {
+    const { agent, workflowCreates } = makeAgent(makeState("queued"));
+
+    const first = await agent.startRun(IDS.tenantId, IDS.slug, IDS.externalId, "scheduled-poll", "attempt=0");
+    const second = await agent.startRun(IDS.tenantId, IDS.slug, IDS.externalId, "scheduled-poll", "attempt=0");
+
+    expect(second.workflow_instance_id).toBe(first.workflow_instance_id);
+    expect(workflowCreates).toHaveLength(1);
+  });
+
+  test("startRun rejects non-queued states", async () => {
+    const { agent, workflowCreates } = makeAgent(makeState("failed"));
+
+    await expect(agent.startRun(IDS.tenantId, IDS.slug, IDS.externalId)).rejects.toThrow(
+      "issue_startrun_invalid_state: failed",
+    );
+    expect(workflowCreates).toHaveLength(0);
+  });
+
+  test("onRunFinished completed moves running to completed and clears the lease", async () => {
+    const { agent, readState } = makeAgent(
+      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+    );
+
+    const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed");
+
+    expect(state.status).toBe("completed");
+    expect(state.workflow_instance_id).toBeUndefined();
+    expect(readState()).toMatchObject({ status: "completed" });
+    expect(readState()?.workflow_instance_id).toBeUndefined();
+  });
+
+  test("onRunFinished failed moves running to failed and clears the lease", async () => {
+    const { agent, readState } = makeAgent(
+      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+    );
+
+    const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "failed");
+
+    expect(state.status).toBe("failed");
+    expect(state.workflow_instance_id).toBeUndefined();
+    expect(readState()?.workflow_instance_id).toBeUndefined();
+  });
+
+  test("onRunFinished cancelled moves running to cancelled and clears the lease", async () => {
+    const { agent, readState } = makeAgent(
+      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+    );
+
+    const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "cancelled");
+
+    expect(state.status).toBe("cancelled");
+    expect(state.workflow_instance_id).toBeUndefined();
+    expect(readState()?.workflow_instance_id).toBeUndefined();
+  });
+
+  test("onRunFinished retry moves running to queued, clears the lease, and preserves attempt", async () => {
+    const { agent, readState } = makeAgent(
+      makeState("running", {
+        attempt: 3,
+        workflow_instance_id: "run:tenant:profile:issue-1:3",
+      }),
+    );
+
+    const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "retry");
+
+    expect(state.status).toBe("queued");
+    expect(state.attempt).toBe(3);
+    expect(state.workflow_instance_id).toBeUndefined();
+    expect(readState()).toMatchObject({ status: "queued", attempt: 3 });
+    expect(readState()?.workflow_instance_id).toBeUndefined();
+  });
+
+  test("onRunFinished is idempotent on already-terminal outcome", async () => {
+    const { agent, readState } = makeAgent(
+      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+    );
+
+    const first = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed");
+    const second = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed");
+
+    expect(second).toEqual(first);
+    expect(readState()).toEqual(first);
+  });
+
+  test("onRunFinished rejects non-running states", async () => {
+    const { agent } = makeAgent(makeState("queued"));
+
+    await expect(agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed")).rejects.toThrow(
+      "issue_onrunfinished_invalid_state: queued",
+    );
   });
 });
 

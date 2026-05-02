@@ -14,6 +14,7 @@ type Env = {
   PROJECT_AGENT: DurableObjectNamespace<ProjectAgent>;
   ISSUE_AGENT: DurableObjectNamespace<IssueAgent>;
   DISPATCH: Queue<IssueDispatchMessage>;
+  EXECUTION_WORKFLOW: Workflow<import("../workflows/execution.js").ExecutionWorkflowParams>;
   LINEAR_API_KEY?: string;
 };
 
@@ -57,10 +58,9 @@ export async function handleTrackerRefresh(
   const stub = env.PROJECT_AGENT.get(id);
   const result = await stub.poll(message.tenant_id, message.slug);
 
-  // Enqueue one IssueDispatchMessage per dispatch decision. Phase 5
-  // ExecutionWorkflow will consume these from symphony-dispatch and
-  // start the actual run; Phase 4 sub-cut 2 only transitions the
-  // IssueAgent into `queued`.
+  // Enqueue one IssueDispatchMessage per dispatch decision. The dispatch
+  // consumer transitions IssueAgent into `queued`, then starts the Phase 5
+  // ExecutionWorkflow run.
   const dispatchMessages = result.decisions
     .filter((d) => d.kind === "dispatch")
     .map((d) => ({
@@ -93,9 +93,8 @@ export async function handleTrackerRefresh(
  * Handle one issue.dispatch message.
  *
  * The default v1 path routes through IssueAgent.dispatch, which transitions
- * the agent into `queued`. Phase 4 invariant: this does NOT start a run; the
- * queued state is durable but no consumer acts on it yet. Phase 5
- * ExecutionWorkflow + IssueAgent.startRun will pick up from here.
+ * the agent into `queued`, then IssueAgent.startRun acquires the workflow
+ * lease and creates the ExecutionWorkflow instance.
  *
  * Retry layers are deliberately split: Cloudflare Queue retries protect this
  * handler when the DO call itself fails, while IssueAgent.markFailed bumps the
@@ -115,27 +114,45 @@ export async function handleIssueDispatch(
     durableObjectName("issue", message.tenant_id, message.slug, message.external_id),
   );
   const stub = env.ISSUE_AGENT.get(id);
-  const state =
-    message.version === 2 && message.inject_failure === true ?
-      await stub.markFailed(
-        message.tenant_id,
-        message.slug,
-        message.external_id,
-        message.error ?? "inject_failure (test seam)",
-      )
-    : await stub.dispatch(
-        message.tenant_id,
-        message.slug,
-        message.external_id,
-        "scheduled-poll",
-        `attempt=${message.attempt}`,
-      );
+  if (message.version === 2 && message.inject_failure === true) {
+    const state = await stub.markFailed(
+      message.tenant_id,
+      message.slug,
+      message.external_id,
+      message.error ?? "inject_failure (test seam)",
+    );
+
+    return {
+      external_id: message.external_id,
+      identifier: message.identifier,
+      agent_status: state.status,
+      dispatch_count: state.dispatchCount,
+      duration_ms: Date.now() - startedAt,
+    };
+  }
+
+  // Dispatch is the idempotent discovered/retry -> queued transition; startRun
+  // then moves queued -> running and creates the workflow instance.
+  await stub.dispatch(
+    message.tenant_id,
+    message.slug,
+    message.external_id,
+    "scheduled-poll",
+    `attempt=${message.attempt}`,
+  );
+  const runningState = await stub.startRun(
+    message.tenant_id,
+    message.slug,
+    message.external_id,
+    "scheduled-poll",
+    `attempt=${message.attempt}`,
+  );
 
   return {
     external_id: message.external_id,
     identifier: message.identifier,
-    agent_status: state.status,
-    dispatch_count: state.dispatchCount,
+    agent_status: runningState.status,
+    dispatch_count: runningState.dispatchCount,
     duration_ms: Date.now() - startedAt,
   };
 }

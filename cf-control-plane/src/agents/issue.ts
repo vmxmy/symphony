@@ -17,9 +17,7 @@
 // wait until Phase 5 when we have run lifecycle to mirror. Dashboard
 // reads agent state per-issue via a Worker route that calls getStatus.
 //
-// Phase 4 sub-cut 3 PR-C adds markFailed + retryNow + alarm-driven
-// re-dispatch + D1 issue_retries mirror writes. The run lease
-// (workflow_instance_id) remains out of scope until Phase 5.
+// Phase 5 PR-B adds running + completed states + workflow_instance_id lease + startRun/onRunFinished. Run lifecycle bodies (16 steps + MockCodingAgentAdapter + R2 manifest) land in PR-C.
 
 import { DurableObject } from "cloudflare:workers";
 import { nextBackoffMs } from "./backoff.js";
@@ -32,7 +30,9 @@ export type IssueAgentStatus =
   | "paused"
   | "cancelled"
   | "retry_wait"
-  | "failed";
+  | "failed"
+  | "running"
+  | "completed";
 
 export type IssueAgentState = {
   issueKey: string; // `${tenantId}:${slug}:${externalId}`
@@ -47,6 +47,8 @@ export type IssueAgentState = {
   dispatchCount: number;
   /** Business-layer retry attempt. PR-A preserves it; PR-C markFailed will increment it. */
   attempt: number;
+  /** Workflow instance id when status === "running". The lease. */
+  workflow_instance_id?: string;
   lastError?: string;
   /** ISO timestamp when the next business-layer retry becomes due. */
   nextRetryAt?: string;
@@ -56,18 +58,23 @@ type Env = {
   DB: D1Database;
   ISSUE_AGENT: DurableObjectNamespace;
   DISPATCH: Queue<IssueDispatchMessage>;
+  EXECUTION_WORKFLOW: Workflow<import("../workflows/execution.js").ExecutionWorkflowParams>;
 };
 
 const ALLOWED_TRANSITIONS: Record<IssueAgentStatus, IssueAgentStatus[]> = {
   discovered: ["queued", "cancelled"],
-  queued: ["paused", "cancelled", "retry_wait", "failed"],
+  queued: ["paused", "cancelled", "retry_wait", "failed", "running"],
   paused: ["queued", "cancelled"],
   cancelled: [], // terminal
   retry_wait: ["queued", "paused", "cancelled"],
   failed: ["queued", "cancelled"],
+  running: ["queued", "retry_wait", "failed", "cancelled", "completed"],
+  completed: [], // terminal-success
 };
 
 export class IssueAgent extends DurableObject<Env> {
+  private startRunInFlight = new Map<string, Promise<IssueAgentState>>();
+
   private profileId(tenantId: string, slug: string): string {
     return `${tenantId}/${slug}`;
   }
@@ -185,10 +192,130 @@ export class IssueAgent extends DurableObject<Env> {
       reason,
       dispatchCount:
         next === "queued" ? current.dispatchCount + 1 : current.dispatchCount,
+      workflow_instance_id: next === "running" ? current.workflow_instance_id : undefined,
       nextRetryAt: next === "retry_wait" ? current.nextRetryAt : undefined,
     };
     await this.ctx.storage.put("state", updated);
     return updated;
+  }
+
+  /**
+   * Phase 5 PR-B: start a new ExecutionWorkflow instance for this issue.
+   *
+   * Idempotent on (tenantId, slug, externalId, current.attempt): if called
+   * twice while still in queued (or already running), returns the same
+   * workflow_instance_id without creating a new instance.
+   *
+   * The lease is the workflow_instance_id — non-null while running, cleared
+   * on transition out via onRunFinished or any other terminal transition.
+   */
+  async startRun(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    decidedBy?: string,
+    reason?: string,
+  ): Promise<IssueAgentState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    assertControlPlaneId("issue", externalId);
+
+    const key = this.issueId(tenantId, slug, externalId);
+    const inFlight = this.startRunInFlight.get(key);
+    if (inFlight) return inFlight;
+
+    const start = this.startRunOnce(tenantId, slug, externalId, decidedBy, reason)
+      .finally(() => {
+        this.startRunInFlight.delete(key);
+      });
+    this.startRunInFlight.set(key, start);
+    return start;
+  }
+
+  private async startRunOnce(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    decidedBy?: string,
+    reason?: string,
+  ): Promise<IssueAgentState> {
+    const current = await this.loadOrInit(tenantId, slug, externalId);
+
+    // Idempotency: if we already have a running lease for this issue/attempt,
+    // return as-is. Phase 5 plan §9 R-3.
+    if (current.status === "running" && current.workflow_instance_id) {
+      return current;
+    }
+
+    if (current.status !== "queued") {
+      throw new Error(`issue_startrun_invalid_state: ${current.status}`);
+    }
+
+    const instanceId = `run:${tenantId}:${slug}:${externalId}:${current.attempt}`;
+    const params = {
+      tenant_id: tenantId,
+      slug,
+      external_id: externalId,
+      identifier: externalId,
+      attempt: current.attempt,
+      workflow_instance_id: instanceId,
+    };
+    const now = new Date().toISOString();
+    const updated: IssueAgentState = {
+      ...current,
+      status: "running",
+      workflow_instance_id: instanceId,
+      updatedAt: now,
+      decidedBy,
+      reason,
+    };
+
+    // Persist the lease before the external workflow side effect so any
+    // re-entrant startRun observes the in-progress run instead of creating a
+    // second workflow instance.
+    await this.ctx.storage.put("state", updated);
+    await this.env.EXECUTION_WORKFLOW.create({ id: instanceId, params });
+    return updated;
+  }
+
+  /**
+   * Phase 5 PR-B: notify the IssueAgent that a workflow has terminated.
+   * Called by the workflows last step (PR-C). Outcome decides next state.
+   *
+   * - completed: running -> completed (terminal-success)
+   * - failed: running -> failed (or retry_wait if attempts < max — defer to
+   *   markFailed which already encapsulates that decision; here we only
+   *   handle the transition into the terminal-failure state requested by
+   *   the workflow caller)
+   * - cancelled: running -> cancelled
+   * - retry: running -> queued (so a fresh markFailed in the next attempt
+   *   can re-evaluate retry_wait vs failed)
+   *
+   * Idempotent on outcome: calling twice with the same outcome is a no-op.
+   */
+  async onRunFinished(
+    tenantId: string,
+    slug: string,
+    externalId: string,
+    outcome: "completed" | "failed" | "cancelled" | "retry",
+    decidedBy?: string,
+    reason?: string,
+  ): Promise<IssueAgentState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    assertControlPlaneId("issue", externalId);
+
+    const current = await this.loadOrInit(tenantId, slug, externalId);
+
+    // Idempotency on terminal-already states.
+    const expected = outcomeToStatus(outcome);
+    if (current.status === expected) return current;
+
+    if (current.status !== "running") {
+      throw new Error(`issue_onrunfinished_invalid_state: ${current.status}`);
+    }
+
+    return this.transition(tenantId, slug, externalId, expected, decidedBy ?? "execution-workflow", reason ?? `outcome=${outcome}`);
   }
 
   async dispatch(
@@ -198,6 +325,13 @@ export class IssueAgent extends DurableObject<Env> {
     decidedBy?: string,
     reason?: string,
   ): Promise<IssueAgentState> {
+    assertControlPlaneId("tenant", tenantId);
+    assertControlPlaneId("profile", slug);
+    assertControlPlaneId("issue", externalId);
+
+    const current = await this.loadOrInit(tenantId, slug, externalId);
+    if (current.status === "running" && current.workflow_instance_id) return current;
+
     const state = await this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
     await this.deleteRetryMirror(tenantId, slug, externalId);
     return state;
@@ -342,5 +476,18 @@ export class IssueAgent extends DurableObject<Env> {
     const state = await this.transition(tenantId, slug, externalId, "cancelled", decidedBy, reason);
     await this.deleteRetryMirror(tenantId, slug, externalId);
     return state;
+  }
+}
+
+function outcomeToStatus(outcome: "completed" | "failed" | "cancelled" | "retry"): IssueAgentStatus {
+  switch (outcome) {
+    case "completed":
+      return "completed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    case "retry":
+      return "queued";
   }
 }
