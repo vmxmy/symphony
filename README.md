@@ -1,8 +1,23 @@
 # Symphony
 
-Symphony is a TypeScript/Bun automation service that turns tracker issues into isolated Codex implementation runs. It polls a project workflow, creates a per-issue workspace, runs an agent session, records observability data, and exposes a lightweight dashboard/API for operators.
+Symphony is a TypeScript/Bun automation service that currently turns tracker
+issues into isolated Codex implementation runs. It polls a project workflow,
+creates a per-issue workspace, runs an agent session, records observability
+data, and exposes a lightweight dashboard/API for operators.
 
-This fork is organized around reusable **profiles**: each profile packages a `WORKFLOW.md`, credentials template, skills, and isolated `CODEX_HOME` so multiple pipelines can run from the same engine without sharing runtime state.
+This fork is organized around reusable **profiles**: each profile packages a
+`WORKFLOW.md`, credentials template, skills, and isolated `CODEX_HOME` so
+multiple pipelines can run from the same engine without sharing runtime state.
+
+The vNext product target is broader: a generic agent ticket workflow platform
+where the canonical core is:
+
+```text
+Ticket -> WorkflowInstance -> WorkflowStep -> AgentRole / ToolInvocation / Approval / Artifact / AuditEvent
+```
+
+In that target, Linear/Jira/Slack/email are connectors, and Codex/workspace
+execution is a coding workflow adapter.
 
 ## What is in this repo
 
@@ -11,7 +26,8 @@ This fork is organized around reusable **profiles**: each profile packages a `WO
 - `bin/symphony-launch` — profile-aware process manager
 - `profiles/` — workflow bundles and the profile template
 - `docs/` — architecture, profile, launcher, and deployment docs
-- `SPEC.md` — language-agnostic Symphony behavior contract
+- `SPEC.md` — v1 coding issue-runner compatibility contract
+- `docs/generic-ticket-workflow-spec.md` — vNext generic ticket workflow product/runtime spec
 
 ## Quick Start
 
@@ -46,11 +62,16 @@ make build
 make all
 ```
 
-`make build` compiles `ts-engine/src/main.ts` to `bin/symphony-ts`, which is ignored as a local build artifact. The tracked `bin/symphony` wrapper runs the same engine from source.
+`make build` compiles `ts-engine/src/main.ts` to `bin/symphony-ts`, which is
+ignored as a local build artifact. The tracked `bin/symphony` wrapper runs the
+same engine from source.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Generic ticket workflow specification](docs/generic-ticket-workflow-spec.md)
+- [Generic ticket workflow PR gates](docs/generic-ticket-workflow-pr-gates.md)
+- [ADR-0003: Generic Ticket Workflow Core](docs/adr/0003-generic-ticket-workflow-core.md)
 - [Profile specification](docs/profile-spec.md)
 - [Launcher CLI](docs/launcher-cli.md)
 - [Creating a profile](docs/creating-a-profile.md)

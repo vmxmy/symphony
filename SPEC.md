@@ -4,6 +4,13 @@ Status: Draft v1 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
+Scope note: this document remains the v1 coding issue-runner compatibility
+contract. The vNext generic ticket workflow platform target is defined in
+`docs/generic-ticket-workflow-spec.md`, with the accepted architecture decision
+in `docs/adr/0003-generic-ticket-workflow-core.md`. New generic workflow work
+must treat Linear as a connector and Codex/workspace execution as a
+`coding_agent_run` adapter, not as mandatory product core.
+
 ## Normative Language
 
 The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHOULD`, `SHOULD NOT`, `RECOMMENDED`, `MAY`, and
