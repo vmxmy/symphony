@@ -2,7 +2,10 @@ import { requireCapability, type Principal } from "../auth/operator.js";
 import { createOrGetTicketFromSource, getTicketById } from "./store.js";
 import type { Ticket, TicketPriority, TicketSource, TicketStatus } from "./types.js";
 import {
+  decideGenericWorkflowApproval,
+  getGenericApprovalById,
   getGenericWorkflowInstanceById,
+  type GenericApprovalDecision,
   listGenericWorkflowSteps,
   startGenericTicketWorkflowForTicket,
 } from "../workflows/generic_ticket.js";
@@ -10,6 +13,7 @@ import {
 const TICKET_PRIORITIES = new Set<TicketPriority>(["low", "normal", "high", "urgent"]);
 const COMMENT_VISIBILITIES = new Set(["internal", "external_sync"]);
 const DIRECT_CREATE_SOURCES = new Set(["api", "manual"]);
+const APPROVAL_DECISIONS = new Set<GenericApprovalDecision>(["approved", "rejected", "changes_requested"]);
 
 export async function handleTicketApiV2(req: Request, db: D1Database, principal: Principal): Promise<Response> {
   const url = new URL(req.url);
@@ -48,6 +52,12 @@ export async function handleTicketApiV2(req: Request, db: D1Database, principal:
   if (workflowRoute) {
     if (req.method !== "GET") return methodNotAllowed(["GET"]);
     return getWorkflowInstance(req, db, principal, decodeURIComponent(workflowRoute[1]!));
+  }
+
+  const approvalDecisionRoute = url.pathname.match(/^\/api\/v2\/approvals\/([^/]+)\/decision$/);
+  if (approvalDecisionRoute) {
+    if (req.method !== "POST") return methodNotAllowed(["POST"]);
+    return decideApproval(req, db, principal, decodeURIComponent(approvalDecisionRoute[1]!));
   }
 
   return notFound();
@@ -332,6 +342,61 @@ async function getWorkflowInstanceSteps(req: Request, db: D1Database, principal:
       status: instance.status,
     },
     steps: await listGenericWorkflowSteps(db, workflowInstanceId),
+  });
+}
+
+async function decideApproval(req: Request, db: D1Database, principal: Principal, approvalId: string): Promise<Response> {
+  const denied = requireCapability(principal, "approval.decide");
+  if (denied) return denied;
+
+  const parsed = await readJsonObject(req);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.value;
+
+  const decision = requiredStringField(body, "decision");
+  if (!decision.ok) return decision.response;
+  if (!APPROVAL_DECISIONS.has(decision.value as GenericApprovalDecision)) {
+    return jsonResponse({ error: "invalid_field", field: "decision" }, { status: 400 });
+  }
+
+  const approval = await getGenericApprovalById(db, approvalId);
+  if (!approval) return notFound();
+  const tenantDenied = authorizeTenantFromRequest(principal, approval.tenantId, new URL(req.url).searchParams, body);
+  if (tenantDenied) return tenantDenied;
+
+  const now = new Date().toISOString();
+  const result = await decideGenericWorkflowApproval(db, approvalId, {
+    decision: decision.value as GenericApprovalDecision,
+    decidedBy: principal.subject,
+    decisionRef: JSON.stringify({
+      decision: decision.value,
+      comment: nullableStringField(body, "comment"),
+      decidedBy: principal.subject,
+      decidedAt: now,
+    }),
+    now,
+  });
+
+  if (!result.ok) {
+    if (result.error === "approval_not_found" || result.error === "ticket_not_found" || result.error === "workflow_not_found") return notFound();
+    if (result.error === "approval_not_pending") {
+      return jsonResponse(
+        {
+          error: "approval_already_decided",
+          status: result.approval?.status ?? null,
+          approvalId,
+        },
+        { status: 409 },
+      );
+    }
+    return jsonResponse({ error: result.error, approvalId }, { status: 409 });
+  }
+
+  return jsonResponse({
+    approval: result.approval,
+    ticket: shapeTicket(result.ticket),
+    workflowInstance: result.instance,
+    steps: result.steps,
   });
 }
 
@@ -684,12 +749,16 @@ function authorizeTenant(principal: Principal, tenantId: string): Response | nul
   return null;
 }
 
-function authorizeTenantFromRequest(principal: Principal, resourceTenantId: string, query: URLSearchParams): Response | null {
+function authorizeTenantFromRequest(principal: Principal, resourceTenantId: string, query: URLSearchParams, body: Record<string, unknown> = {}): Response | null {
   const queryTenantId = query.get("tenantId")?.trim();
+  const bodyTenantId = stringField(body, "tenantId");
   if (principal.tenantId && queryTenantId && principal.tenantId !== queryTenantId) {
     return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
   }
-  const tenantId = principal.tenantId ?? queryTenantId;
+  if (principal.tenantId && bodyTenantId && principal.tenantId !== bodyTenantId) {
+    return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
+  }
+  const tenantId = principal.tenantId ?? queryTenantId ?? bodyTenantId;
   if (!tenantId) {
     return jsonResponse({ error: "missing_tenant_scope", field: "tenantId" }, { status: 400 });
   }
