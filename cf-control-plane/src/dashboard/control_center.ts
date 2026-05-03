@@ -212,7 +212,7 @@ function page(title: string, tenantId: string, generatedAt: string, body: string
     </nav>
   </header>
   ${body}
-  <footer>Agent Control Center is read-only in G4. Approval decisions, workflow resume, and tool execution are deferred to later gates.</footer>
+  <footer>Agent Control Center renders a safe read-only operator view; approval decisions are handled through the authenticated API.</footer>
 </body>
 </html>`;
 }
@@ -327,7 +327,7 @@ export function renderApprovalCenter(state: ApprovalCenterView): string {
     state.generated_at,
     `<section class="panel">
       <h2>Approvals (${state.approvals.length})</h2>
-      <p class="muted">G4 shows read-only approval packages. Approve/reject/change actions land in G6.</p>
+      <p class="muted">Approval decisions are first-class workflow events; this MVP page keeps the queue read-only while API actions drive resume/stop behavior.</p>
       <table>
         <thead><tr><th>ticket</th><th>title</th><th>exact effect</th><th>status</th><th>group</th><th>requester</th><th>risk/evidence ref</th><th>decision ref</th><th>requested</th></tr></thead>
         <tbody>${rows}</tbody>

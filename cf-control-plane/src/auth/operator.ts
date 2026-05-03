@@ -9,6 +9,7 @@ export type Capability =
   | "ticket.create"
   | "ticket.comment"
   | "workflow.read"
+  | "approval.decide"
   | "connector.ingest"
   | "write:run.mock"
   | "write:run.cancel";
@@ -39,6 +40,7 @@ const ALL_CAPABILITIES: Capability[] = [
   "ticket.create",
   "ticket.comment",
   "workflow.read",
+  "approval.decide",
   "connector.ingest",
   "write:run.mock",
   "write:run.cancel",

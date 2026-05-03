@@ -64,6 +64,40 @@ export type GenericWorkflowRunResult = {
   steps: GenericWorkflowStep[];
 };
 
+export type GenericApprovalDecision = "approved" | "rejected" | "changes_requested";
+
+export type GenericApproval = {
+  id: string;
+  tenantId: string;
+  ticketId: string | null;
+  workflowInstanceId: string | null;
+  workflowStepId: string | null;
+  action: string;
+  status: string;
+  requestedBy: string | null;
+  decidedBy: string | null;
+  requestRef: string;
+  decisionRef: string | null;
+  approverGroup: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+  expiresAt: string | null;
+};
+
+export type GenericApprovalDecisionResult =
+  | {
+      ok: true;
+      approval: GenericApproval;
+      ticket: Ticket;
+      instance: GenericWorkflowInstance;
+      steps: GenericWorkflowStep[];
+    }
+  | {
+      ok: false;
+      error: "approval_not_found" | "approval_not_pending" | "approval_not_generic" | "workflow_not_found" | "ticket_not_found" | "workflow_definition_not_found";
+      approval?: GenericApproval;
+    };
+
 export type GenericTicketWorkflowParams = {
   ticketId: string;
 };
@@ -141,6 +175,10 @@ type WorkflowStepDefinition = {
   role: string | null;
   goal: string | null;
   summary: string | null;
+  approverGroup: string | null;
+  action: string | null;
+  riskLevel: string | null;
+  expiresIn: string | null;
 };
 
 type NormalizedWorkflowDefinition = {
@@ -158,7 +196,7 @@ type AuditEventInput = {
   ticketId: string;
   workflowInstanceId: string;
   workflowStepId?: string | null;
-  actorType: "system" | "agent";
+  actorType: "system" | "agent" | "human";
   actorId?: string | null;
   action: string;
   summary: string;
@@ -167,6 +205,28 @@ type AuditEventInput = {
 };
 
 const GENERIC_RUNTIME_KIND = "mock_generic_ticket_workflow";
+const GENERIC_APPROVAL_PROFILE_ID = "generic-ticket-workflow";
+
+type ApprovalRow = {
+  id: string;
+  tenant_id: string;
+  profile_id: string;
+  issue_id: string | null;
+  run_id: string | null;
+  action: string;
+  status: string;
+  requested_by: string | null;
+  decided_by: string | null;
+  request_ref: string;
+  decision_ref: string | null;
+  created_at: string;
+  decided_at: string | null;
+  ticket_id: string | null;
+  workflow_instance_id: string | null;
+  workflow_step_id: string | null;
+  approver_group: string | null;
+  expires_at: string | null;
+};
 
 export async function startGenericTicketWorkflowForTicket(
   db: D1Database,
@@ -209,6 +269,90 @@ export async function listGenericWorkflowSteps(
   return (results ?? []).map(shapeWorkflowStep);
 }
 
+export async function getGenericApprovalById(db: D1Database, approvalId: string): Promise<GenericApproval | null> {
+  const row = await db.prepare(`SELECT * FROM approvals WHERE id = ?`).bind(approvalId).first<ApprovalRow>();
+  return row ? shapeApproval(row) : null;
+}
+
+export async function decideGenericWorkflowApproval(
+  db: D1Database,
+  approvalId: string,
+  input: {
+    decision: GenericApprovalDecision;
+    decidedBy: string;
+    decisionRef: string;
+    now?: string;
+  },
+): Promise<GenericApprovalDecisionResult> {
+  const now = input.now ?? new Date().toISOString();
+  const approval = await getGenericApprovalById(db, approvalId);
+  if (!approval) return { ok: false, error: "approval_not_found" };
+  if (!approval.ticketId || !approval.workflowInstanceId || !approval.workflowStepId) {
+    return { ok: false, error: "approval_not_generic", approval };
+  }
+  if (approval.status !== "pending") {
+    return { ok: false, error: "approval_not_pending", approval };
+  }
+
+  const instance = await getGenericWorkflowInstanceById(db, approval.workflowInstanceId);
+  if (!instance) return { ok: false, error: "workflow_not_found", approval };
+
+  const ticket = await getTicketById(db, approval.ticketId);
+  if (!ticket || ticket.archivedAt) return { ok: false, error: "ticket_not_found", approval };
+
+  const definition = await loadWorkflowDefinitionVersion(db, ticket.tenantId, instance.workflowKey, instance.workflowVersion);
+  if (!definition) return { ok: false, error: "workflow_definition_not_found", approval };
+
+  const workflowStep = await db.prepare(`SELECT * FROM workflow_steps WHERE id = ?`).bind(approval.workflowStepId).first<WorkflowStepRow>();
+  if (!workflowStep) return { ok: false, error: "workflow_not_found", approval };
+
+  const decided = await db
+    .prepare(
+      `UPDATE approvals
+          SET status = ?, decided_by = ?, decision_ref = ?, decided_at = ?
+        WHERE id = ? AND status = 'pending'`,
+    )
+    .bind(input.decision, input.decidedBy, input.decisionRef, now, approvalId)
+    .run();
+
+  if ((decided.meta.changes ?? 0) === 0) {
+    const current = await getGenericApprovalById(db, approvalId);
+    return { ok: false, error: "approval_not_pending", approval: current ?? approval };
+  }
+
+  await insertAuditEventOnce(db, {
+    id: auditId(instance.id, `step.${workflowStep.sequence}.approval.decided`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId: instance.id,
+    workflowStepId: approval.workflowStepId,
+    actorType: "human",
+    actorId: input.decidedBy,
+    action: "approval.decided",
+    summary: `Approval ${approval.action} ${input.decision}`,
+    payloadRef: input.decisionRef,
+    createdAt: now,
+  });
+
+  if (input.decision === "approved") {
+    await completeApprovalStep(db, ticket, instance, workflowStep, input.decidedBy, now);
+    const resumed = await runGenericTicketWorkflow(db, ticket, definition, now);
+    return { ok: true, approval: (await getGenericApprovalById(db, approvalId)) ?? approval, ...resumed };
+  }
+
+  const ticketStatus: TicketStatus = input.decision === "changes_requested" ? "REWORK" : "CANCELLED";
+  const instanceStatus: WorkflowInstanceStatus = "cancelled";
+  await stopWorkflowForApprovalDecision(db, ticket, instance, workflowStep, input.decision, ticketStatus, instanceStatus, input.decidedBy, now);
+
+  return {
+    ok: true,
+    approval: (await getGenericApprovalById(db, approvalId)) ?? approval,
+    ticket: (await getTicketById(db, ticket.id)) ?? ticket,
+    instance: await requireWorkflowInstance(db, instance.id),
+    steps: await listGenericWorkflowSteps(db, instance.id),
+  };
+}
+
 async function loadActiveWorkflowDefinition(
   db: D1Database,
   tenantId: string,
@@ -223,6 +367,24 @@ async function loadActiveWorkflowDefinition(
         LIMIT 1`,
     )
     .bind(tenantId, workflowKey)
+    .first<WorkflowDefinitionRow>();
+  return row ? normalizeWorkflowDefinition(row) : null;
+}
+
+async function loadWorkflowDefinitionVersion(
+  db: D1Database,
+  tenantId: string,
+  workflowKey: string,
+  version: number,
+): Promise<NormalizedWorkflowDefinition | null> {
+  const row = await db
+    .prepare(
+      `SELECT *
+         FROM workflow_definitions
+        WHERE tenant_id = ? AND key = ? AND version = ?
+        LIMIT 1`,
+    )
+    .bind(tenantId, workflowKey, version)
     .first<WorkflowDefinitionRow>();
   return row ? normalizeWorkflowDefinition(row) : null;
 }
@@ -257,7 +419,7 @@ async function runGenericTicketWorkflow(
     .run();
 
   let instance = await requireWorkflowInstance(db, instanceId);
-  if (instance.status === "completed") {
+  if (isTerminalWorkflowStatus(instance.status)) {
     return { ticket: (await getTicketById(db, ticket.id)) ?? ticket, instance, steps: await listGenericWorkflowSteps(db, instanceId) };
   }
 
@@ -274,7 +436,15 @@ async function runGenericTicketWorkflow(
   });
 
   for (const [index, stepDefinition] of definition.steps.entries()) {
-    await runGenericWorkflowStep(db, ticket, instanceId, stepDefinition, index + 1, now);
+    const stepResult = await runGenericWorkflowStep(db, ticket, instanceId, definition.version, stepDefinition, index + 1, now);
+    if (stepResult.status === "paused") {
+      instance = await requireWorkflowInstance(db, instanceId);
+      return {
+        ticket: (await getTicketById(db, ticket.id)) ?? ticket,
+        instance,
+        steps: await listGenericWorkflowSteps(db, instanceId),
+      };
+    }
   }
 
   const completedAt = new Date().toISOString();
@@ -306,17 +476,24 @@ async function runGenericTicketWorkflow(
   };
 }
 
+type StepRunResult = { status: "completed" } | { status: "paused" };
+
 async function runGenericWorkflowStep(
   db: D1Database,
   ticket: Ticket,
   workflowInstanceId: string,
+  workflowVersion: number,
   stepDefinition: WorkflowStepDefinition,
   sequence: number,
   now: string,
-): Promise<void> {
+): Promise<StepRunResult> {
   const stepId = workflowStepId(workflowInstanceId, sequence);
   const existing = await db.prepare(`SELECT * FROM workflow_steps WHERE id = ?`).bind(stepId).first<WorkflowStepRow>();
-  if (existing?.status === "completed") return;
+  if (existing?.status === "completed") return { status: "completed" };
+  if (existing?.status === "waiting_human" && stepDefinition.type === "approval") {
+    await pauseForApprovalStep(db, ticket, workflowInstanceId, workflowVersion, stepId, stepDefinition, sequence, now);
+    return { status: "paused" };
+  }
 
   await db
     .prepare(
@@ -360,6 +537,11 @@ async function runGenericWorkflowStep(
     createdAt: now,
   });
 
+  if (stepDefinition.type === "approval") {
+    await pauseForApprovalStep(db, ticket, workflowInstanceId, workflowVersion, stepId, stepDefinition, sequence, now);
+    return { status: "paused" };
+  }
+
   if (stepDefinition.type === "agent") {
     await recordMockAgentSession(db, ticket, workflowInstanceId, stepDefinition, sequence, now);
   }
@@ -390,6 +572,171 @@ async function runGenericWorkflowStep(
     action: "workflow.step.completed",
     summary: `Step ${stepDefinition.id} completed`,
     createdAt: completedAt,
+  });
+
+  return { status: "completed" };
+}
+
+async function pauseForApprovalStep(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  workflowVersion: number,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  now: string,
+): Promise<void> {
+  const approvalId = workflowApprovalId(stepId);
+  const requestRef = JSON.stringify({
+    actionSummary: approvalActionSummary(stepDefinition),
+    riskLevel: stepDefinition.riskLevel ?? "medium",
+    evidence: [],
+    effect: "approved resumes the workflow at the next step; rejected cancels it; changes_requested moves the ticket to REWORK",
+    workflowInstanceId,
+    workflowStepId: stepId,
+    stepKey: stepDefinition.id,
+  });
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO approvals (
+         id, tenant_id, profile_id, issue_id, run_id, action, status,
+         requested_by, request_ref, created_at, ticket_id, workflow_instance_id,
+         workflow_step_id, approver_group, expires_at
+       ) VALUES (?, ?, ?, NULL, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      approvalId,
+      ticket.tenantId,
+      GENERIC_APPROVAL_PROFILE_ID,
+      stepDefinition.action ?? `approval.${stepDefinition.id}`,
+      "workflow-runtime",
+      requestRef,
+      now,
+      ticket.id,
+      workflowInstanceId,
+      stepId,
+      stepDefinition.approverGroup,
+      approvalExpiresAt(now, stepDefinition.expiresIn),
+    )
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE workflow_steps
+          SET status = 'waiting_human', summary = ?, error_message = NULL
+        WHERE id = ?`,
+    )
+    .bind(`Waiting for ${stepDefinition.approverGroup ?? "human"} approval: ${approvalActionSummary(stepDefinition)}`, stepId)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE workflow_instances
+          SET status = 'waiting_human', current_step_key = ?, error_message = NULL
+        WHERE id = ?`,
+    )
+    .bind(stepDefinition.id, workflowInstanceId)
+    .run();
+  await updateTicketState(db, ticket.id, "WAITING_HUMAN", workflowVersion, now);
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.approval.requested`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    action: "approval.requested",
+    summary: `Approval requested for ${stepDefinition.id}`,
+    payloadRef: requestRef,
+    createdAt: now,
+  });
+}
+
+async function completeApprovalStep(
+  db: D1Database,
+  ticket: Ticket,
+  instance: GenericWorkflowInstance,
+  workflowStep: WorkflowStepRow,
+  decidedBy: string,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE workflow_steps
+          SET status = 'completed', output_ref = ?, summary = ?, completed_at = ?, error_message = NULL
+        WHERE id = ?`,
+    )
+    .bind(
+      `mock://workflow/${instance.id}/steps/${workflowStep.sequence}/approval-decision`,
+      `Approval ${workflowStep.step_key} approved by ${decidedBy}`,
+      now,
+      workflowStep.id,
+    )
+    .run();
+
+  await insertAuditEventOnce(db, {
+    id: auditId(instance.id, `step.${workflowStep.sequence}.completed`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId: instance.id,
+    workflowStepId: workflowStep.id,
+    actorType: "system",
+    action: "workflow.step.completed",
+    summary: `Step ${workflowStep.step_key} completed after approval`,
+    createdAt: now,
+  });
+}
+
+async function stopWorkflowForApprovalDecision(
+  db: D1Database,
+  ticket: Ticket,
+  instance: GenericWorkflowInstance,
+  workflowStep: WorkflowStepRow,
+  decision: Exclude<GenericApprovalDecision, "approved">,
+  ticketStatus: TicketStatus,
+  instanceStatus: WorkflowInstanceStatus,
+  decidedBy: string,
+  now: string,
+): Promise<void> {
+  const summary = decision === "changes_requested" ? `Approval requested changes by ${decidedBy}` : `Approval rejected by ${decidedBy}`;
+  await db
+    .prepare(
+      `UPDATE workflow_steps
+          SET status = 'cancelled', output_ref = ?, summary = ?, completed_at = ?, error_message = ?
+        WHERE id = ?`,
+    )
+    .bind(
+      `mock://workflow/${instance.id}/steps/${workflowStep.sequence}/approval-decision`,
+      summary,
+      now,
+      summary,
+      workflowStep.id,
+    )
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE workflow_instances
+          SET status = ?, current_step_key = NULL, completed_at = ?, error_message = ?
+        WHERE id = ?`,
+    )
+    .bind(instanceStatus, now, summary, instance.id)
+    .run();
+  await updateTicketState(db, ticket.id, ticketStatus, instance.workflowVersion, now);
+
+  await insertAuditEventOnce(db, {
+    id: auditId(instance.id, `step.${workflowStep.sequence}.${decision}`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId: instance.id,
+    workflowStepId: workflowStep.id,
+    actorType: "system",
+    action: decision === "changes_requested" ? "workflow.rework_requested" : "workflow.cancelled",
+    summary,
+    createdAt: now,
   });
 }
 
@@ -502,6 +849,10 @@ function normalizeStep(rawStep: unknown, index: number): WorkflowStepDefinition 
     role: stringProperty(rawStep, "role"),
     goal: stringProperty(rawStep, "goal"),
     summary: stringProperty(rawStep, "summary"),
+    approverGroup: stringProperty(rawStep, "approver_group") ?? stringProperty(rawStep, "approverGroup"),
+    action: stringProperty(rawStep, "action"),
+    riskLevel: stringProperty(rawStep, "risk_level") ?? stringProperty(rawStep, "riskLevel"),
+    expiresIn: stringProperty(rawStep, "expires_in") ?? stringProperty(rawStep, "expiresIn"),
   };
 }
 
@@ -512,6 +863,10 @@ function defaultStep(): WorkflowStepDefinition {
     role: "executor",
     goal: "Complete the mock generic workflow step.",
     summary: null,
+    approverGroup: null,
+    action: null,
+    riskLevel: null,
+    expiresIn: null,
   };
 }
 
@@ -534,8 +889,35 @@ function workflowStepId(workflowInstanceId: string, sequence: number): string {
   return `${workflowInstanceId}:step:${sequence}`;
 }
 
+function workflowApprovalId(workflowStepId: string): string {
+  return `${workflowStepId}:approval`;
+}
+
 function auditId(workflowInstanceId: string, name: string): string {
   return `${workflowInstanceId}:audit:${name}`;
+}
+
+function isTerminalWorkflowStatus(status: WorkflowInstanceStatus): boolean {
+  return ["completed", "failed", "cancelled", "expired"].includes(status);
+}
+
+function approvalActionSummary(stepDefinition: WorkflowStepDefinition): string {
+  if (stepDefinition.goal) return stepDefinition.goal;
+  if (stepDefinition.summary) return stepDefinition.summary;
+  return `Approve workflow step ${stepDefinition.id}`;
+}
+
+function approvalExpiresAt(now: string, expiresIn: string | null): string | null {
+  if (!expiresIn) return null;
+  const match = /^(\d+)\s*(minute|minutes|hour|hours|day|days)$/i.exec(expiresIn.trim());
+  if (!match?.[1] || !match[2]) return null;
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) return null;
+  const unit = match[2].toLowerCase();
+  const multiplier = unit.startsWith("minute") ? 60_000 : unit.startsWith("hour") ? 3_600_000 : 86_400_000;
+  const base = Date.parse(now);
+  if (!Number.isFinite(base)) return null;
+  return new Date(base + value * multiplier).toISOString();
 }
 
 function shapeWorkflowInstance(row: WorkflowInstanceRow): GenericWorkflowInstance {
@@ -571,6 +953,26 @@ function shapeWorkflowStep(row: WorkflowStepRow): GenericWorkflowStep {
     startedAt: row.started_at,
     completedAt: row.completed_at,
     errorMessage: row.error_message,
+  };
+}
+
+function shapeApproval(row: ApprovalRow): GenericApproval {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    ticketId: row.ticket_id,
+    workflowInstanceId: row.workflow_instance_id,
+    workflowStepId: row.workflow_step_id,
+    action: row.action,
+    status: row.status,
+    requestedBy: row.requested_by,
+    decidedBy: row.decided_by,
+    requestRef: row.request_ref,
+    decisionRef: row.decision_ref,
+    approverGroup: row.approver_group,
+    createdAt: row.created_at,
+    decidedAt: row.decided_at,
+    expiresAt: row.expires_at,
   };
 }
 

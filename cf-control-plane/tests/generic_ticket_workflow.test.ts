@@ -38,15 +38,15 @@ function makeEnv(db: SqliteDb) {
     OPERATOR_TOKEN: TOKEN,
     ARTIFACTS: {
       async put() {
-        throw new Error("G5 generic workflow must not write R2 artifacts");
+        throw new Error("generic ticket workflow must not write R2 artifacts");
       },
     } as unknown as R2Bucket,
     EXECUTION_WORKFLOW: {
       async create() {
-        throw new Error("G5 generic workflow must not launch coding ExecutionWorkflow");
+        throw new Error("generic ticket workflow must not launch coding ExecutionWorkflow");
       },
       async get() {
-        throw new Error("G5 generic workflow must not inspect coding ExecutionWorkflow");
+        throw new Error("generic ticket workflow must not inspect coding ExecutionWorkflow");
       },
     },
     TENANT_AGENT: throwingNamespace("TENANT_AGENT"),
@@ -60,10 +60,10 @@ function makeEnv(db: SqliteDb) {
 function throwingNamespace(name: string): DurableObjectNamespace {
   return {
     idFromName() {
-      throw new Error(`G5 generic workflow must not touch ${name}`);
+      throw new Error(`generic ticket workflow must not touch ${name}`);
     },
     get() {
-      throw new Error(`G5 generic workflow must not touch ${name}`);
+      throw new Error(`generic ticket workflow must not touch ${name}`);
     },
   } as unknown as DurableObjectNamespace;
 }
@@ -71,10 +71,10 @@ function throwingNamespace(name: string): DurableObjectNamespace {
 function throwingQueue(name: string): Queue {
   return {
     async send() {
-      throw new Error(`G5 generic workflow must not enqueue ${name}`);
+      throw new Error(`generic ticket workflow must not enqueue ${name}`);
     },
     async sendBatch() {
-      throw new Error(`G5 generic workflow must not enqueue ${name}`);
+      throw new Error(`generic ticket workflow must not enqueue ${name}`);
     },
   } as unknown as Queue;
 }
@@ -108,7 +108,18 @@ async function createVendorTicket(env: ReturnType<typeof makeEnv>) {
   );
 }
 
-function seedWorkflowDefinition(db: SqliteDb) {
+type WorkflowStepSeed = {
+  id: string;
+  type: string;
+  role?: string;
+  goal?: string;
+  approver_group?: string;
+  action?: string;
+  risk_level?: string;
+  expires_in?: string;
+};
+
+function seedWorkflowDefinition(db: SqliteDb, steps: WorkflowStepSeed[] = defaultWorkflowSteps()) {
   db.query(
     `INSERT INTO workflow_definitions (
        id, tenant_id, key, version, name, status, definition_json, source_ref, created_at, updated_at
@@ -123,16 +134,36 @@ function seedWorkflowDefinition(db: SqliteDb) {
       key: "vendor-due-diligence",
       name: "Vendor Due Diligence",
       version: 1,
-      steps: [
-        { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
-        { id: "research", type: "agent", role: "researcher", goal: "Collect vendor risk evidence." },
-        { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
-      ],
+      steps,
     }),
     "test://workflow-definitions/vendor-due-diligence/v1",
     "2026-05-03T00:00:00.000Z",
     "2026-05-03T00:00:00.000Z",
   );
+}
+
+function defaultWorkflowSteps(): WorkflowStepSeed[] {
+  return [
+    { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
+    { id: "research", type: "agent", role: "researcher", goal: "Collect vendor risk evidence." },
+    { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
+  ];
+}
+
+function approvalWorkflowSteps(): WorkflowStepSeed[] {
+  return [
+    { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
+    {
+      id: "plan_approval",
+      type: "approval",
+      goal: "Approve the due diligence plan before execution.",
+      approver_group: "procurement",
+      action: "vendor_due_diligence.plan_approval",
+      risk_level: "medium",
+      expires_in: "2 days",
+    },
+    { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
+  ];
 }
 
 function tableCount(db: SqliteDb, table: string, where = "1 = 1"): number {
@@ -146,7 +177,25 @@ function auditActions(db: SqliteDb): string[] {
     .map((row) => String((row as { action: string }).action));
 }
 
-describe("G5 GenericTicketWorkflow MVP", () => {
+function approvalRow(db: SqliteDb) {
+  return db.query(`SELECT * FROM approvals ORDER BY created_at ASC LIMIT 1`).get() as
+    | {
+        id: string;
+        status: string;
+        ticket_id: string;
+        workflow_instance_id: string;
+        workflow_step_id: string;
+        approver_group: string;
+        requested_by: string;
+        decided_by: string | null;
+        request_ref: string;
+        decision_ref: string | null;
+        decided_at: string | null;
+      }
+    | null;
+}
+
+describe("GenericTicketWorkflow generic ticket runtime", () => {
   test("POST /api/v2/tickets starts and completes a non-coding workflow when an active definition exists", async () => {
     const db = createMigratedDatabase();
     seedWorkflowDefinition(db);
@@ -260,5 +309,196 @@ describe("G5 GenericTicketWorkflow MVP", () => {
 
     expect(forbidden.status).toBe(403);
     expect((await forbidden.json()) as { error: string }).toMatchObject({ error: "tenant_forbidden" });
+  });
+
+  test("approval steps create a pending approval row and pause before later steps", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(db, approvalWorkflowSteps());
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { ticketId: string; workflowInstanceId: string; status: string };
+    expect(body.status).toBe("WAITING_HUMAN");
+
+    const instance = db.query(`SELECT status, current_step_key, completed_at FROM workflow_instances WHERE id = ?`).get(body.workflowInstanceId) as {
+      status: string;
+      current_step_key: string;
+      completed_at: string | null;
+    };
+    expect(instance).toEqual({ status: "waiting_human", current_step_key: "plan_approval", completed_at: null });
+
+    const steps = db.query(`SELECT step_key, step_type, status FROM workflow_steps ORDER BY sequence`).all() as Array<{ step_key: string; step_type: string; status: string }>;
+    expect(steps).toEqual([
+      { step_key: "intake", step_type: "agent", status: "completed" },
+      { step_key: "plan_approval", step_type: "approval", status: "waiting_human" },
+    ]);
+
+    const approval = approvalRow(db);
+    expect(approval).toMatchObject({
+      status: "pending",
+      ticket_id: body.ticketId,
+      workflow_instance_id: body.workflowInstanceId,
+      approver_group: "procurement",
+      requested_by: "workflow-runtime",
+      decided_by: null,
+    });
+    expect(JSON.parse(approval?.request_ref ?? "{}")).toMatchObject({
+      actionSummary: "Approve the due diligence plan before execution.",
+      riskLevel: "medium",
+      effect: expect.stringContaining("approved resumes"),
+    });
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["approval.requested"]));
+    expect(auditActions(db)).not.toContain("workflow.completed");
+  });
+
+  test("approved decisions are immutable and resume the workflow to completion", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(db, approvalWorkflowSteps());
+    const env = makeEnv(db);
+    const created = await createVendorTicket(env);
+    const { workflowInstanceId } = (await created.json()) as { workflowInstanceId: string };
+    const approval = approvalRow(db);
+    expect(approval?.status).toBe("pending");
+
+    const decided = await worker.fetch(
+      request("POST", `/api/v2/approvals/${approval?.id}/decision`, {
+        tenantId: TENANT,
+        decision: "approved",
+        comment: "Plan is acceptable.",
+      }),
+      env,
+      {},
+    );
+
+    expect(decided.status).toBe(200);
+    const decidedBody = (await decided.json()) as {
+      approval: { status: string; decidedBy: string; decisionRef: string };
+      ticket: { status: string };
+      workflowInstance: { status: string; id: string };
+      steps: Array<{ stepKey: string; status: string }>;
+    };
+    expect(decidedBody.approval.status).toBe("approved");
+    expect(decidedBody.approval.decidedBy).toBe("operator-token");
+    expect(JSON.parse(decidedBody.approval.decisionRef)).toMatchObject({ decision: "approved", comment: "Plan is acceptable." });
+    expect(decidedBody.ticket.status).toBe("COMPLETED");
+    expect(decidedBody.workflowInstance).toMatchObject({ id: workflowInstanceId, status: "completed" });
+    expect(decidedBody.steps.map((step) => [step.stepKey, step.status])).toEqual([
+      ["intake", "completed"],
+      ["plan_approval", "completed"],
+      ["deliver", "completed"],
+    ]);
+
+    const secondDecision = await worker.fetch(
+      request("POST", `/api/v2/approvals/${approval?.id}/decision`, {
+        tenantId: TENANT,
+        decision: "rejected",
+        comment: "Too late to change.",
+      }),
+      env,
+      {},
+    );
+    expect(secondDecision.status).toBe(409);
+    expect((await secondDecision.json()) as { error: string; status: string }).toMatchObject({ error: "approval_already_decided", status: "approved" });
+    expect((approvalRow(db) as { status: string }).status).toBe("approved");
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["approval.decided", "workflow.completed"]));
+  });
+
+  test("rejected decisions stop the workflow and do not execute later steps", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(db, approvalWorkflowSteps());
+    const env = makeEnv(db);
+    await createVendorTicket(env);
+    const approval = approvalRow(db);
+
+    const rejected = await worker.fetch(
+      request("POST", `/api/v2/approvals/${approval?.id}/decision`, {
+        tenantId: TENANT,
+        decision: "rejected",
+        comment: "Insufficient evidence.",
+      }),
+      env,
+      {},
+    );
+
+    expect(rejected.status).toBe(200);
+    const body = (await rejected.json()) as {
+      approval: { status: string };
+      ticket: { status: string };
+      workflowInstance: { status: string; completedAt: string | null };
+      steps: Array<{ stepKey: string; status: string }>;
+    };
+    expect(body.approval.status).toBe("rejected");
+    expect(body.ticket.status).toBe("CANCELLED");
+    expect(body.workflowInstance.status).toBe("cancelled");
+    expect(body.workflowInstance.completedAt).toBeString();
+    expect(body.steps.map((step) => [step.stepKey, step.status])).toEqual([
+      ["intake", "completed"],
+      ["plan_approval", "cancelled"],
+    ]);
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["approval.decided", "workflow.cancelled"]));
+    expect(auditActions(db)).not.toContain("workflow.completed");
+  });
+
+  test("changes_requested decisions move the ticket to rework without running later steps", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(db, approvalWorkflowSteps());
+    const env = makeEnv(db);
+    await createVendorTicket(env);
+    const approval = approvalRow(db);
+
+    const changes = await worker.fetch(
+      request("POST", `/api/v2/approvals/${approval?.id}/decision`, {
+        tenantId: TENANT,
+        decision: "changes_requested",
+        comment: "Add sanctions screening evidence.",
+      }),
+      env,
+      {},
+    );
+
+    expect(changes.status).toBe(200);
+    const body = (await changes.json()) as {
+      approval: { status: string };
+      ticket: { status: string };
+      workflowInstance: { status: string };
+      steps: Array<{ stepKey: string; status: string }>;
+    };
+    expect(body.approval.status).toBe("changes_requested");
+    expect(body.ticket.status).toBe("REWORK");
+    expect(body.workflowInstance.status).toBe("cancelled");
+    expect(body.steps.map((step) => [step.stepKey, step.status])).toEqual([
+      ["intake", "completed"],
+      ["plan_approval", "cancelled"],
+    ]);
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["approval.decided", "workflow.rework_requested"]));
+  });
+
+  test("approval decisions enforce tenant scope before mutating approval state", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(db, approvalWorkflowSteps());
+    const env = makeEnv(db);
+    await createVendorTicket(env);
+    const approval = approvalRow(db);
+
+    const forbidden = await worker.fetch(
+      request(
+        "POST",
+        `/api/v2/approvals/${approval?.id}/decision`,
+        { tenantId: "tenant_2", decision: "approved" },
+        { "X-Symphony-Tenant": "tenant_2" },
+      ),
+      env,
+      {},
+    );
+
+    expect(forbidden.status).toBe(403);
+    expect((await forbidden.json()) as { error: string }).toMatchObject({ error: "tenant_forbidden" });
+    expect((approvalRow(db) as { status: string }).status).toBe("pending");
+    expect(auditActions(db)).not.toContain("approval.decided");
   });
 });

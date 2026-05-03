@@ -187,7 +187,7 @@ describe("G4 Agent Control Center routes", () => {
     expect(html).toContain("procurement");
     expect(html).toContain("r2://approval-pack-risk-evidence");
     expect(html).toContain(`/tickets/${TICKET_ID}?tenantId=tenant_1`);
-    expect(html).toContain("Approve/reject/change actions land in G6");
+    expect(html).toContain("API actions drive resume/stop behavior");
     expect(html).not.toContain("<button");
   });
 
