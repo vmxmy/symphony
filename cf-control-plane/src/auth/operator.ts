@@ -5,6 +5,7 @@ export type Capability =
   | "write:project.transition"
   | "write:project.refresh"
   | "write:issue.transition"
+  | "write:ticket"
   | "write:run.mock"
   | "write:run.cancel";
 
@@ -29,6 +30,7 @@ const ALL_CAPABILITIES: Capability[] = [
   "write:project.transition",
   "write:project.refresh",
   "write:issue.transition",
+  "write:ticket",
   "write:run.mock",
   "write:run.cancel",
 ];
