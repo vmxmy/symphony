@@ -196,6 +196,7 @@ describe("IssueAgent.startRun lease ordering (Phase 6 PR-A F-5)", () => {
     expect((thrown as Error).message).toBe("create_failed: simulated");
     // create() was attempted exactly once
     expect(creates).toHaveLength(1);
+    expect(creates[0]?.id).toBe("run-tenant-profile-issue-1-0");
     // and DO storage still says queued, with no lease
     const persisted = readState();
     expect(persisted?.status).toBe("queued");
@@ -224,11 +225,11 @@ describe("IssueAgent.startRun lease ordering (Phase 6 PR-A F-5)", () => {
 
     // #then the second attempt transitions to running with a single create
     expect(state.status).toBe("running");
-    expect(state.workflow_instance_id).toBe("run:tenant:profile:issue-1:0");
+    expect(state.workflow_instance_id).toBe("run-tenant-profile-issue-1-0");
     expect(success.creates).toHaveLength(1);
     expect(readState2()).toMatchObject({
       status: "running",
-      workflow_instance_id: "run:tenant:profile:issue-1:0",
+      workflow_instance_id: "run-tenant-profile-issue-1-0",
     });
   });
 
@@ -244,7 +245,7 @@ describe("IssueAgent.startRun lease ordering (Phase 6 PR-A F-5)", () => {
     ]);
 
     // #then both share the same lease and only one create() ran
-    expect(first.workflow_instance_id).toBe("run:tenant:profile:issue-1:0");
+    expect(first.workflow_instance_id).toBe("run-tenant-profile-issue-1-0");
     expect(second.workflow_instance_id).toBe(first.workflow_instance_id);
     expect(creates).toHaveLength(1);
   });

@@ -277,6 +277,23 @@ describe("IssueAgent state machine", () => {
     expect(state.attempt).toBe(4);
     expect(readState()?.attempt).toBe(4);
   });
+
+  test("dispatch applies queue message attempt before startRun", async () => {
+    const { agent, readState } = makeAgent(makeState("discovered"));
+
+    const state = await agent.dispatch(
+      IDS.tenantId,
+      IDS.slug,
+      IDS.externalId,
+      "scheduled-poll",
+      "attempt=1",
+      1,
+    );
+
+    expect(state.status).toBe("queued");
+    expect(state.attempt).toBe(1);
+    expect(readState()).toMatchObject({ status: "queued", attempt: 1 });
+  });
 });
 
 describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
@@ -286,21 +303,21 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
     const state = await agent.startRun(IDS.tenantId, IDS.slug, IDS.externalId, "scheduled-poll", "attempt=0");
 
     expect(state.status).toBe("running");
-    expect(state.workflow_instance_id).toBe("run:tenant:profile:issue-1:0");
+    expect(state.workflow_instance_id).toBe("run-tenant-profile-issue-1-0");
     expect(readState()).toMatchObject({
       status: "running",
-      workflow_instance_id: "run:tenant:profile:issue-1:0",
+      workflow_instance_id: "run-tenant-profile-issue-1-0",
     });
     expect(workflowCreates).toEqual([
       {
-        id: "run:tenant:profile:issue-1:0",
+        id: "run-tenant-profile-issue-1-0",
         params: {
           tenant_id: IDS.tenantId,
           slug: IDS.slug,
           external_id: IDS.externalId,
           identifier: IDS.externalId,
           attempt: 0,
-          workflow_instance_id: "run:tenant:profile:issue-1:0",
+          workflow_instance_id: "run-tenant-profile-issue-1-0",
         },
       },
     ]);
@@ -327,7 +344,7 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
 
   test("onRunFinished completed moves running to completed and clears the lease", async () => {
     const { agent, readState } = makeAgent(
-      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+      makeState("running", { workflow_instance_id: "run-tenant-profile-issue-1-0" }),
     );
 
     const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed");
@@ -340,7 +357,7 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
 
   test("onRunFinished failed moves running to failed and clears the lease", async () => {
     const { agent, readState } = makeAgent(
-      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+      makeState("running", { workflow_instance_id: "run-tenant-profile-issue-1-0" }),
     );
 
     const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "failed");
@@ -352,7 +369,7 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
 
   test("onRunFinished cancelled moves running to cancelled and clears the lease", async () => {
     const { agent, readState } = makeAgent(
-      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+      makeState("running", { workflow_instance_id: "run-tenant-profile-issue-1-0" }),
     );
 
     const state = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "cancelled");
@@ -366,7 +383,7 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
     const { agent, readState } = makeAgent(
       makeState("running", {
         attempt: 3,
-        workflow_instance_id: "run:tenant:profile:issue-1:3",
+        workflow_instance_id: "run-tenant-profile-issue-1-3",
       }),
     );
 
@@ -381,7 +398,7 @@ describe("IssueAgent.startRun + onRunFinished (Phase 5 PR-B)", () => {
 
   test("onRunFinished is idempotent on already-terminal outcome", async () => {
     const { agent, readState } = makeAgent(
-      makeState("running", { workflow_instance_id: "run:tenant:profile:issue-1:0" }),
+      makeState("running", { workflow_instance_id: "run-tenant-profile-issue-1-0" }),
     );
 
     const first = await agent.onRunFinished(IDS.tenantId, IDS.slug, IDS.externalId, "completed");

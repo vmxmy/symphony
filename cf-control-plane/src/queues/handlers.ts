@@ -139,6 +139,7 @@ export async function handleIssueDispatch(
     message.external_id,
     "scheduled-poll",
     `attempt=${message.attempt}`,
+    message.attempt,
   );
   const runningState = await stub.startRun(
     message.tenant_id,

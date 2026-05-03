@@ -42,6 +42,7 @@ import type {
   WorkspaceHandle,
   WorkspaceRef,
 } from "../runtime/worker_host.js";
+import { executionRunId } from "./ids.js";
 
 export type ExecutionWorkflowParams = {
   tenant_id: string;
@@ -212,9 +213,21 @@ function leaseStub(env: Env, params: ExecutionWorkflowParams): IssueAgentLeaseSt
 export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflowParams> {
   async run(event: WorkflowEvent<ExecutionWorkflowParams>, step: WorkflowStep): Promise<void> {
     const params = event.payload;
-    const runId = `run:${params.tenant_id}:${params.slug}:${params.external_id}:${params.attempt}`;
+    const runId = executionRunId(
+      params.tenant_id,
+      params.slug,
+      params.external_id,
+      params.attempt,
+    );
     const startedAt = new Date().toISOString();
-    const issueId = `${params.tenant_id}/${params.slug}:${params.external_id}`;
+    const profileForRun = await this.env.DB.prepare(
+      `SELECT id FROM profiles
+        WHERE tenant_id = ? AND slug = ? AND archived_at IS NULL`,
+    )
+      .bind(params.tenant_id, params.slug)
+      .first<{ id: string }>();
+    const profileId = profileForRun?.id ?? `${params.tenant_id}/${params.slug}`;
+    const issueId = `${profileId}:${params.external_id}`;
 
     // Open the runs row idempotently. UNIQUE(issue_id, attempt) guarantees
     // re-runs of the same workflow instance share one row.
@@ -239,7 +252,7 @@ export class ExecutionWorkflow extends WorkflowEntrypoint<Env, ExecutionWorkflow
         const profileRow = await this.env.DB.prepare(
           `SELECT id, slug, config_json FROM profiles WHERE id = ?`,
         )
-          .bind(`${params.tenant_id}/${params.slug}`)
+          .bind(profileId)
           .first<{ id: string; slug: string; config_json: string | null }>();
         return {
           result: { issue: issueRow, profile: profileRow },

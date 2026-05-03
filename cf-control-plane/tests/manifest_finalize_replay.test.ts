@@ -36,7 +36,7 @@ const ATTEMPT = 0;
 const RUN_ID = `run:${TENANT_ID}:${SLUG}:${EXTERNAL_ID}:${ATTEMPT}`;
 const ISSUE_ID = `${TENANT_ID}/${SLUG}:${EXTERNAL_ID}`;
 const PROFILE_ID = `${TENANT_ID}/${SLUG}`;
-const WORKFLOW_INSTANCE_ID = RUN_ID;
+const WORKFLOW_INSTANCE_ID = "run-tenant-profile-issue-1-0";
 
 function seedTenantProfileIssue(db: ReturnType<typeof createMigratedDatabase>) {
   db.query(`
