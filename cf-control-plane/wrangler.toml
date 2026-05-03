@@ -53,6 +53,12 @@ name = "symphony-execution-workflow"
 class_name = "ExecutionWorkflow"
 script_name = "symphony-control-plane"
 
+[[workflows]]
+binding = "GENERIC_TICKET_WORKFLOW"
+name = "symphony-generic-ticket-workflow"
+class_name = "GenericTicketWorkflow"
+script_name = "symphony-control-plane"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["TenantAgent", "ProjectAgent"]

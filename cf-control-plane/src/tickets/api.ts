@@ -1,6 +1,11 @@
 import { requireCapability, type Principal } from "../auth/operator.js";
 import { createOrGetTicketFromSource, getTicketById } from "./store.js";
 import type { Ticket, TicketPriority, TicketSource, TicketStatus } from "./types.js";
+import {
+  getGenericWorkflowInstanceById,
+  listGenericWorkflowSteps,
+  startGenericTicketWorkflowForTicket,
+} from "../workflows/generic_ticket.js";
 
 const TICKET_PRIORITIES = new Set<TicketPriority>(["low", "normal", "high", "urgent"]);
 const COMMENT_VISIBILITIES = new Set(["internal", "external_sync"]);
@@ -31,6 +36,18 @@ export async function handleTicketApiV2(req: Request, db: D1Database, principal:
   if (eventRoute) {
     if (req.method !== "POST") return methodNotAllowed(["POST"]);
     return addTicketEvent(req, db, principal, decodeURIComponent(eventRoute[1]!));
+  }
+
+  const workflowStepsRoute = url.pathname.match(/^\/api\/v2\/workflow-instances\/([^/]+)\/steps$/);
+  if (workflowStepsRoute) {
+    if (req.method !== "GET") return methodNotAllowed(["GET"]);
+    return getWorkflowInstanceSteps(req, db, principal, decodeURIComponent(workflowStepsRoute[1]!));
+  }
+
+  const workflowRoute = url.pathname.match(/^\/api\/v2\/workflow-instances\/([^/]+)$/);
+  if (workflowRoute) {
+    if (req.method !== "GET") return methodNotAllowed(["GET"]);
+    return getWorkflowInstance(req, db, principal, decodeURIComponent(workflowRoute[1]!));
   }
 
   return notFound();
@@ -104,12 +121,15 @@ async function createTicket(req: Request, db: D1Database, principal: Principal):
     createdAt: now,
   });
 
+  const workflowRun = await startGenericTicketWorkflowForTicket(db, result.ticket.id, { now });
+  const responseTicket = workflowRun?.ticket ?? result.ticket;
+
   return jsonResponse(
     {
       ticketId: result.ticket.id,
       ticketKey: result.ticket.key,
-      workflowInstanceId: null,
-      status: result.ticket.status,
+      workflowInstanceId: workflowRun?.instance.id ?? null,
+      status: responseTicket.status,
       created: result.createdTicket,
       source: shapeSource(result.source),
     },
@@ -284,6 +304,35 @@ async function addTicketEvent(req: Request, db: D1Database, principal: Principal
   });
 
   return jsonResponse({ event: audit }, { status: 202 });
+}
+
+async function getWorkflowInstance(req: Request, db: D1Database, principal: Principal, workflowInstanceId: string): Promise<Response> {
+  const denied = requireCapability(principal, "workflow.read");
+  if (denied) return denied;
+
+  const instance = await getGenericWorkflowInstanceById(db, workflowInstanceId);
+  if (!instance) return notFound();
+  const tenantDenied = authorizeTenantFromRequest(principal, instance.tenantId, new URL(req.url).searchParams);
+  if (tenantDenied) return tenantDenied;
+  return jsonResponse({ workflowInstance: instance });
+}
+
+async function getWorkflowInstanceSteps(req: Request, db: D1Database, principal: Principal, workflowInstanceId: string): Promise<Response> {
+  const denied = requireCapability(principal, "workflow.read");
+  if (denied) return denied;
+
+  const instance = await getGenericWorkflowInstanceById(db, workflowInstanceId);
+  if (!instance) return notFound();
+  const tenantDenied = authorizeTenantFromRequest(principal, instance.tenantId, new URL(req.url).searchParams);
+  if (tenantDenied) return tenantDenied;
+  return jsonResponse({
+    workflowInstance: {
+      id: instance.id,
+      ticketId: instance.ticketId,
+      status: instance.status,
+    },
+    steps: await listGenericWorkflowSteps(db, workflowInstanceId),
+  });
 }
 
 type TicketRow = {
@@ -630,6 +679,21 @@ function authorizeTicketRequest(
 
 function authorizeTenant(principal: Principal, tenantId: string): Response | null {
   if (principal.tenantId && principal.tenantId !== tenantId) {
+    return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
+  }
+  return null;
+}
+
+function authorizeTenantFromRequest(principal: Principal, resourceTenantId: string, query: URLSearchParams): Response | null {
+  const queryTenantId = query.get("tenantId")?.trim();
+  if (principal.tenantId && queryTenantId && principal.tenantId !== queryTenantId) {
+    return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
+  }
+  const tenantId = principal.tenantId ?? queryTenantId;
+  if (!tenantId) {
+    return jsonResponse({ error: "missing_tenant_scope", field: "tenantId" }, { status: 400 });
+  }
+  if (tenantId !== resourceTenantId) {
     return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
   }
   return null;
