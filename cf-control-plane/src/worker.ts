@@ -33,6 +33,7 @@ import type { LinearTrackerConfig } from "./tracker/types.js";
 import { extractLinearTrackerConfig } from "./tracker/config.js";
 import { assertControlPlaneId, durableObjectName } from "./identity.js";
 import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/scheduled_poll.js";
+import { handleTicketApiV2 } from "./tickets/api.js";
 import { handleTrackerRefresh, handleIssueDispatch } from "./queues/handlers.js";
 import { parseRuntimeConfig } from "./runtime/factory.js";
 import type {
@@ -435,6 +436,12 @@ export default {
     }
 
     // ---- gated routes ----
+    if (url.pathname.startsWith("/api/v2/")) {
+      const auth = await authenticateOperator(req, env.OPERATOR_TOKEN);
+      if (!auth.ok) return auth.response;
+      return await handleTicketApiV2(req, env.DB, auth.principal);
+    }
+
     if (url.pathname.startsWith("/api/v1/")) {
       const auth = await authenticateOperator(req, env.OPERATOR_TOKEN);
       if (!auth.ok) return auth.response;

@@ -5,6 +5,10 @@ export type Capability =
   | "write:project.transition"
   | "write:project.refresh"
   | "write:issue.transition"
+  | "ticket.read"
+  | "ticket.create"
+  | "ticket.comment"
+  | "connector.ingest"
   | "write:run.mock"
   | "write:run.cancel";
 
@@ -12,6 +16,7 @@ export type Principal = {
   kind: "operator";
   subject: string;
   capabilities: Capability[];
+  tenantId: string | null;
   sessionSource: "header" | "cookie" | "query";
 };
 
@@ -29,6 +34,10 @@ const ALL_CAPABILITIES: Capability[] = [
   "write:project.transition",
   "write:project.refresh",
   "write:issue.transition",
+  "ticket.read",
+  "ticket.create",
+  "ticket.comment",
+  "connector.ingest",
   "write:run.mock",
   "write:run.cancel",
 ];
@@ -89,11 +98,13 @@ async function verifyCookieValue(cookie: string, token: string): Promise<boolean
   return signature === expected;
 }
 
-function operatorPrincipal(sessionSource: Principal["sessionSource"]): Principal {
+function operatorPrincipal(sessionSource: Principal["sessionSource"], req: Request): Principal {
+  const tenantId = req.headers.get("x-symphony-tenant")?.trim() || null;
   return {
     kind: "operator",
     subject: "operator-token",
     capabilities: ALL_CAPABILITIES,
+    tenantId,
     sessionSource,
   };
 }
@@ -119,20 +130,20 @@ export async function authenticateOperator(
   const auth = req.headers.get("authorization") ?? "";
   const bearer = /^Bearer\s+(.+)$/i.exec(auth);
   if (bearer?.[1] === expectedToken) {
-    return { ok: true, principal: operatorPrincipal("header") };
+    return { ok: true, principal: operatorPrincipal("header", req) };
   }
 
   if (options.allowCookie) {
     const cookie = parseCookies(req.headers.get("cookie"))[SESSION_COOKIE_NAME];
     if (cookie && (await verifyCookieValue(cookie, expectedToken))) {
-      return { ok: true, principal: operatorPrincipal("cookie") };
+      return { ok: true, principal: operatorPrincipal("cookie", req) };
     }
   }
 
   if (options.allowQuery) {
     const queryToken = new URL(req.url).searchParams.get("token");
     if (queryToken === expectedToken) {
-      return { ok: true, principal: operatorPrincipal("query") };
+      return { ok: true, principal: operatorPrincipal("query", req) };
     }
   }
 
