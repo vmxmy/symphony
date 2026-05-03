@@ -65,6 +65,7 @@ export type GenericWorkflowRunResult = {
 };
 
 export type GenericApprovalDecision = "approved" | "rejected" | "changes_requested";
+type ToolRiskLevel = "L0" | "L1" | "L2" | "L3" | "L4";
 
 export type GenericApproval = {
   id: string;
@@ -172,6 +173,8 @@ type WorkflowStepRow = {
 type WorkflowStepDefinition = {
   id: string;
   type: string;
+  toolName: string | null;
+  input: Record<string, unknown>;
   role: string | null;
   goal: string | null;
   summary: string | null;
@@ -187,6 +190,7 @@ type NormalizedWorkflowDefinition = {
   key: string;
   version: number;
   name: string;
+  allowedTools: string[];
   steps: WorkflowStepDefinition[];
 };
 
@@ -226,6 +230,53 @@ type ApprovalRow = {
   workflow_step_id: string | null;
   approver_group: string | null;
   expires_at: string | null;
+};
+
+type ToolDefinitionRow = {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string;
+  input_schema_json: string;
+  output_schema_json: string;
+  risk_level: ToolRiskLevel;
+  requires_approval: number;
+  idempotency_required: number;
+  handler: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  archived_at: string | null;
+};
+
+type ToolInvocationRow = {
+  id: string;
+  tenant_id: string;
+  ticket_id: string;
+  workflow_instance_id: string | null;
+  workflow_step_id: string | null;
+  agent_session_id: string | null;
+  tool_name: string;
+  status: "pending" | "running" | "approval_wait" | "completed" | "failed" | "rejected";
+  risk_level: ToolRiskLevel;
+  input_ref: string;
+  output_ref: string | null;
+  approval_id: string | null;
+  idempotency_key: string | null;
+  started_at: string;
+  completed_at: string | null;
+};
+
+type IdempotencyRecordRow = {
+  idem_key: string;
+  tenant_id: string;
+  profile_id: string;
+  issue_id: string | null;
+  run_id: string | null;
+  tool_call_id: string | null;
+  operation_type: string;
+  status: "in_progress" | "completed" | "failed" | "expired";
+  result_ref: string | null;
 };
 
 export async function startGenericTicketWorkflowForTicket(
@@ -334,8 +385,17 @@ export async function decideGenericWorkflowApproval(
     createdAt: now,
   });
 
-  if (input.decision === "approved") {
+  if (input.decision === "approved" && workflowStep.step_type === "approval") {
     await completeApprovalStep(db, ticket, instance, workflowStep, input.decidedBy, now);
+    const resumed = await runGenericTicketWorkflow(db, ticket, definition, now);
+    return { ok: true, approval: (await getGenericApprovalById(db, approvalId)) ?? approval, ...resumed };
+  }
+
+  if (input.decision === "approved") {
+    await db
+      .prepare(`UPDATE tool_invocations SET status = 'running' WHERE approval_id = ? AND status = 'approval_wait'`)
+      .bind(approvalId)
+      .run();
     const resumed = await runGenericTicketWorkflow(db, ticket, definition, now);
     return { ok: true, approval: (await getGenericApprovalById(db, approvalId)) ?? approval, ...resumed };
   }
@@ -436,8 +496,8 @@ async function runGenericTicketWorkflow(
   });
 
   for (const [index, stepDefinition] of definition.steps.entries()) {
-    const stepResult = await runGenericWorkflowStep(db, ticket, instanceId, definition.version, stepDefinition, index + 1, now);
-    if (stepResult.status === "paused") {
+    const stepResult = await runGenericWorkflowStep(db, ticket, instanceId, definition, stepDefinition, index + 1, now);
+    if (stepResult.status !== "completed") {
       instance = await requireWorkflowInstance(db, instanceId);
       return {
         ticket: (await getTicketById(db, ticket.id)) ?? ticket,
@@ -476,13 +536,13 @@ async function runGenericTicketWorkflow(
   };
 }
 
-type StepRunResult = { status: "completed" } | { status: "paused" };
+type StepRunResult = { status: "completed" } | { status: "paused" } | { status: "stopped" };
 
 async function runGenericWorkflowStep(
   db: D1Database,
   ticket: Ticket,
   workflowInstanceId: string,
-  workflowVersion: number,
+  definition: NormalizedWorkflowDefinition,
   stepDefinition: WorkflowStepDefinition,
   sequence: number,
   now: string,
@@ -491,8 +551,11 @@ async function runGenericWorkflowStep(
   const existing = await db.prepare(`SELECT * FROM workflow_steps WHERE id = ?`).bind(stepId).first<WorkflowStepRow>();
   if (existing?.status === "completed") return { status: "completed" };
   if (existing?.status === "waiting_human" && stepDefinition.type === "approval") {
-    await pauseForApprovalStep(db, ticket, workflowInstanceId, workflowVersion, stepId, stepDefinition, sequence, now);
+    await pauseForApprovalStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, now);
     return { status: "paused" };
+  }
+  if (existing?.status === "waiting_human" && stepDefinition.type === "tool") {
+    return runToolGatewayStep(db, ticket, workflowInstanceId, definition, stepId, stepDefinition, sequence, now);
   }
 
   await db
@@ -538,8 +601,12 @@ async function runGenericWorkflowStep(
   });
 
   if (stepDefinition.type === "approval") {
-    await pauseForApprovalStep(db, ticket, workflowInstanceId, workflowVersion, stepId, stepDefinition, sequence, now);
+    await pauseForApprovalStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, now);
     return { status: "paused" };
+  }
+
+  if (stepDefinition.type === "tool") {
+    return runToolGatewayStep(db, ticket, workflowInstanceId, definition, stepId, stepDefinition, sequence, now);
   }
 
   if (stepDefinition.type === "agent") {
@@ -574,6 +641,131 @@ async function runGenericWorkflowStep(
     createdAt: completedAt,
   });
 
+  return { status: "completed" };
+}
+
+async function runToolGatewayStep(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  definition: NormalizedWorkflowDefinition,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  now: string,
+): Promise<StepRunResult> {
+  const toolName = stepDefinition.toolName;
+  if (!toolName) {
+    await failWorkflowStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, "Tool step is missing tool name", now);
+    return { status: "stopped" };
+  }
+  if (!definition.allowedTools.includes(toolName)) {
+    await failWorkflowStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, `Tool ${toolName} is not allowed by workflow`, now);
+    return { status: "stopped" };
+  }
+
+  const toolDefinition = await loadActiveToolDefinition(db, ticket.tenantId, toolName);
+  if (!toolDefinition) {
+    await failWorkflowStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, `Tool ${toolName} is not active for tenant`, now);
+    return { status: "stopped" };
+  }
+
+  const schemaError = validateToolInput(toolDefinition.input_schema_json, stepDefinition.input);
+  const invocationId = toolInvocationId(stepId, toolName);
+  const riskLevel = maxRiskLevel(toolDefinition.risk_level, normalizeRiskLevel(stepDefinition.riskLevel));
+  const inputRef = JSON.stringify({ toolName, input: stepDefinition.input, workflowInstanceId, workflowStepId: stepId });
+  const idempotencyRequired = Boolean(toolDefinition.idempotency_required);
+  const idempotencyKey = idempotencyRequired ? await buildIdempotencyKey(ticket, workflowInstanceId, stepId, toolName, stepDefinition.input) : null;
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO tool_invocations (
+         id, tenant_id, ticket_id, workflow_instance_id, workflow_step_id,
+         tool_name, status, risk_level, input_ref, idempotency_key, started_at
+       ) VALUES (?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)`,
+    )
+    .bind(invocationId, ticket.tenantId, ticket.id, workflowInstanceId, stepId, toolName, riskLevel, inputRef, idempotencyKey, now)
+    .run();
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.tool.invocation.started`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "toolgateway",
+    action: "tool.invocation.started",
+    summary: `Tool ${toolName} invocation started`,
+    payloadRef: inputRef,
+    createdAt: now,
+  });
+
+  if (schemaError) {
+    await db.prepare(`UPDATE tool_invocations SET status = 'failed', completed_at = ? WHERE id = ?`).bind(now, invocationId).run();
+    await failWorkflowStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, schemaError, now);
+    return { status: "stopped" };
+  }
+
+  const existingInvocation = await getToolInvocation(db, invocationId);
+  if (existingInvocation?.status === "completed") {
+    await completeWorkflowStepFromTool(db, ticket, workflowInstanceId, stepId, stepDefinition, sequence, existingInvocation.output_ref ?? toolOutputRef(workflowInstanceId, sequence, toolName), now);
+    return { status: "completed" };
+  }
+
+  const requiresApproval = Boolean(toolDefinition.requires_approval) || riskLevel === "L3" || riskLevel === "L4";
+  if (requiresApproval) {
+    const approvalId = toolApprovalId(invocationId);
+    const approval = await getGenericApprovalById(db, approvalId);
+    if (approval?.status !== "approved") {
+      await pauseForToolApproval(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, toolName, riskLevel, invocationId, approvalId, inputRef, now);
+      return { status: "paused" };
+    }
+  }
+
+  const replay = idempotencyKey ? await getIdempotencyRecord(db, idempotencyKey) : null;
+  if (replay?.status === "completed" && replay.result_ref) {
+    await db
+      .prepare(`UPDATE tool_invocations SET status = 'completed', output_ref = ?, completed_at = ? WHERE id = ?`)
+      .bind(replay.result_ref, now, invocationId)
+      .run();
+    await completeWorkflowStepFromTool(db, ticket, workflowInstanceId, stepId, stepDefinition, sequence, replay.result_ref, now);
+    return { status: "completed" };
+  }
+  if (replay) {
+    const message = `Tool ${toolName} idempotency key is already ${replay.status.replace("_", " ")}`;
+    await db.prepare(`UPDATE tool_invocations SET status = 'failed', completed_at = ? WHERE id = ?`).bind(now, invocationId).run();
+    await failWorkflowStep(db, ticket, workflowInstanceId, definition.version, stepId, stepDefinition, sequence, message, now);
+    return { status: "stopped" };
+  }
+
+  if (idempotencyKey) {
+    await createIdempotencyRecord(db, ticket, workflowInstanceId, invocationId, idempotencyKey, toolName, now);
+  }
+
+  const outputRef = await executeMockToolHandler(db, ticket, workflowInstanceId, stepId, stepDefinition, sequence, toolDefinition, now);
+  await db
+    .prepare(`UPDATE tool_invocations SET status = 'completed', output_ref = ?, completed_at = ? WHERE id = ?`)
+    .bind(outputRef, now, invocationId)
+    .run();
+  if (idempotencyKey) {
+    await completeIdempotencyRecord(db, idempotencyKey, toolName, outputRef, now);
+  }
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.tool.invocation.completed`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "toolgateway",
+    action: "tool.invocation.completed",
+    summary: `Tool ${toolName} invocation completed`,
+    payloadRef: outputRef,
+    createdAt: now,
+  });
+  await completeWorkflowStepFromTool(db, ticket, workflowInstanceId, stepId, stepDefinition, sequence, outputRef, now);
   return { status: "completed" };
 }
 
@@ -655,6 +847,86 @@ async function pauseForApprovalStep(
   });
 }
 
+async function pauseForToolApproval(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  workflowVersion: number,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  toolName: string,
+  riskLevel: ToolRiskLevel,
+  invocationId: string,
+  approvalId: string,
+  inputRef: string,
+  now: string,
+): Promise<void> {
+  const requestRef = JSON.stringify({
+    actionSummary: `Approve governed tool ${toolName}`,
+    riskLevel,
+    evidence: [inputRef],
+    effect: "approved executes the governed tool via ToolGateway; rejected cancels it; changes_requested moves the ticket to REWORK",
+    workflowInstanceId,
+    workflowStepId: stepId,
+    toolInvocationId: invocationId,
+    toolName,
+  });
+
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO approvals (
+         id, tenant_id, profile_id, issue_id, run_id, action, status,
+         requested_by, request_ref, created_at, ticket_id, workflow_instance_id,
+         workflow_step_id, approver_group, expires_at
+       ) VALUES (?, ?, ?, NULL, NULL, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      approvalId,
+      ticket.tenantId,
+      GENERIC_APPROVAL_PROFILE_ID,
+      `tool.${toolName}`,
+      "toolgateway",
+      requestRef,
+      now,
+      ticket.id,
+      workflowInstanceId,
+      stepId,
+      stepDefinition.approverGroup ?? "tool_approvers",
+      approvalExpiresAt(now, stepDefinition.expiresIn),
+    )
+    .run();
+
+  await db
+    .prepare(`UPDATE tool_invocations SET status = 'approval_wait', approval_id = ?, risk_level = ?, input_ref = ? WHERE id = ?`)
+    .bind(approvalId, riskLevel, inputRef, invocationId)
+    .run();
+
+  await db
+    .prepare(`UPDATE workflow_steps SET status = 'waiting_human', summary = ?, error_message = NULL WHERE id = ?`)
+    .bind(`Waiting for ${riskLevel} ToolGateway approval: ${toolName}`, stepId)
+    .run();
+  await db
+    .prepare(`UPDATE workflow_instances SET status = 'waiting_human', current_step_key = ?, error_message = NULL WHERE id = ?`)
+    .bind(stepDefinition.id, workflowInstanceId)
+    .run();
+  await updateTicketState(db, ticket.id, "WAITING_HUMAN", workflowVersion, now);
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.tool.approval.requested`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "toolgateway",
+    action: "approval.requested",
+    summary: `Approval requested for tool ${toolName}`,
+    payloadRef: requestRef,
+    createdAt: now,
+  });
+}
+
 async function completeApprovalStep(
   db: D1Database,
   ticket: Ticket,
@@ -686,6 +958,74 @@ async function completeApprovalStep(
     actorType: "system",
     action: "workflow.step.completed",
     summary: `Step ${workflowStep.step_key} completed after approval`,
+    createdAt: now,
+  });
+}
+
+async function completeWorkflowStepFromTool(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  outputRef: string,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE workflow_steps
+          SET status = 'completed', output_ref = ?, summary = ?, completed_at = ?, error_message = NULL
+        WHERE id = ?`,
+    )
+    .bind(outputRef, `ToolGateway completed ${stepDefinition.toolName ?? stepDefinition.id}`, now, stepId)
+    .run();
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.completed`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "toolgateway",
+    action: "workflow.step.completed",
+    summary: `Step ${stepDefinition.id} completed`,
+    payloadRef: outputRef,
+    createdAt: now,
+  });
+}
+
+async function failWorkflowStep(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  workflowVersion: number,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  message: string,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare(`UPDATE workflow_steps SET status = 'failed', error_message = ?, completed_at = ? WHERE id = ?`)
+    .bind(message, now, stepId)
+    .run();
+  await db
+    .prepare(`UPDATE workflow_instances SET status = 'failed', current_step_key = NULL, completed_at = ?, error_message = ? WHERE id = ?`)
+    .bind(now, message, workflowInstanceId)
+    .run();
+  await updateTicketState(db, ticket.id, "FAILED", workflowVersion, now);
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.failed`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "toolgateway",
+    action: "workflow.step.failed",
+    summary: `Step ${stepDefinition.id} failed: ${message}`,
     createdAt: now,
   });
 }
@@ -724,6 +1064,10 @@ async function stopWorkflowForApprovalDecision(
         WHERE id = ?`,
     )
     .bind(instanceStatus, now, summary, instance.id)
+    .run();
+  await db
+    .prepare(`UPDATE tool_invocations SET status = 'rejected', completed_at = ? WHERE workflow_step_id = ? AND status = 'approval_wait'`)
+    .bind(now, workflowStep.id)
     .run();
   await updateTicketState(db, ticket.id, ticketStatus, instance.workflowVersion, now);
 
@@ -772,6 +1116,101 @@ async function recordMockAgentSession(
     .prepare(`UPDATE agent_sessions SET status = 'done', updated_at = ? WHERE id = ?`)
     .bind(new Date().toISOString(), agentSessionId)
     .run();
+}
+
+async function loadActiveToolDefinition(db: D1Database, tenantId: string, toolName: string): Promise<ToolDefinitionRow | null> {
+  return db
+    .prepare(
+      `SELECT *
+         FROM tool_definitions
+        WHERE tenant_id = ? AND name = ? AND status = 'active' AND archived_at IS NULL
+        LIMIT 1`,
+    )
+    .bind(tenantId, toolName)
+    .first<ToolDefinitionRow>();
+}
+
+async function getToolInvocation(db: D1Database, invocationId: string): Promise<ToolInvocationRow | null> {
+  return db.prepare(`SELECT * FROM tool_invocations WHERE id = ?`).bind(invocationId).first<ToolInvocationRow>();
+}
+
+async function getIdempotencyRecord(db: D1Database, idempotencyKey: string): Promise<IdempotencyRecordRow | null> {
+  return db.prepare(`SELECT * FROM idempotency_records WHERE idem_key = ?`).bind(idempotencyKey).first<IdempotencyRecordRow>();
+}
+
+async function createIdempotencyRecord(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  invocationId: string,
+  idempotencyKey: string,
+  toolName: string,
+  now: string,
+): Promise<void> {
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO idempotency_records (
+         idem_key, tenant_id, profile_id, issue_id, run_id, tool_call_id,
+         operation_type, status, lease_owner, attempt_count, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'in_progress', 'toolgateway', 1, ?)`,
+    )
+    .bind(idempotencyKey, ticket.tenantId, GENERIC_APPROVAL_PROFILE_ID, ticket.id, workflowInstanceId, invocationId, toolName, now)
+    .run();
+}
+
+async function completeIdempotencyRecord(db: D1Database, idempotencyKey: string, toolName: string, outputRef: string, now: string): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE idempotency_records
+          SET status = 'completed', external_ref = ?, result_ref = ?, finalized_at = ?
+        WHERE idem_key = ?`,
+    )
+    .bind(`mock://${toolName}`, outputRef, now, idempotencyKey)
+    .run();
+}
+
+async function executeMockToolHandler(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  toolDefinition: ToolDefinitionRow,
+  now: string,
+): Promise<string> {
+  if (toolDefinition.handler === "artifact.create" || toolDefinition.name === "artifact.create") {
+    const artifactId = `${stepId}:artifact`;
+    const kind = stringInput(stepDefinition.input, "kind") ?? "json";
+    const mimeType = stringInput(stepDefinition.input, "mimeType") ?? "application/json";
+    const r2Key = `mock-r2://artifacts/${ticket.id}/${encodeURIComponent(stepId)}.json`;
+    const metadata = isRecord(stepDefinition.input.metadata) ? stepDefinition.input.metadata : {};
+    await db
+      .prepare(
+        `INSERT OR IGNORE INTO artifacts (
+           id, tenant_id, ticket_id, workflow_instance_id, workflow_step_id,
+           kind, r2_key, mime_type, metadata_json, created_by, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'toolgateway', ?)`,
+      )
+      .bind(artifactId, ticket.tenantId, ticket.id, workflowInstanceId, stepId, kind, r2Key, mimeType, JSON.stringify(metadata), now)
+      .run();
+    await insertAuditEventOnce(db, {
+      id: auditId(workflowInstanceId, `step.${sequence}.artifact.created`),
+      tenantId: ticket.tenantId,
+      ticketId: ticket.id,
+      workflowInstanceId,
+      workflowStepId: stepId,
+      actorType: "system",
+      actorId: "toolgateway",
+      action: "artifact.created",
+      summary: `Artifact ${kind} created by ToolGateway`,
+      payloadRef: r2Key,
+      createdAt: now,
+    });
+    return r2Key;
+  }
+
+  return toolOutputRef(workflowInstanceId, sequence, toolDefinition.name);
 }
 
 async function updateTicketState(
@@ -829,6 +1268,7 @@ function normalizeWorkflowDefinition(row: WorkflowDefinitionRow): NormalizedWork
     key: stringProperty(body, "key") ?? row.key,
     version: numberProperty(body, "version") ?? row.version,
     name: stringProperty(body, "name") ?? row.name,
+    allowedTools: normalizeAllowedTools(body.tools),
     steps: normalizeSteps(body.steps),
   };
 }
@@ -846,6 +1286,8 @@ function normalizeStep(rawStep: unknown, index: number): WorkflowStepDefinition 
   return {
     id,
     type,
+    toolName: stringProperty(rawStep, "tool") ?? stringProperty(rawStep, "toolName"),
+    input: recordProperty(rawStep, "input") ?? {},
     role: stringProperty(rawStep, "role"),
     goal: stringProperty(rawStep, "goal"),
     summary: stringProperty(rawStep, "summary"),
@@ -860,6 +1302,8 @@ function defaultStep(): WorkflowStepDefinition {
   return {
     id: "mock_agent",
     type: "agent",
+    toolName: null,
+    input: {},
     role: "executor",
     goal: "Complete the mock generic workflow step.",
     summary: null,
@@ -889,12 +1333,24 @@ function workflowStepId(workflowInstanceId: string, sequence: number): string {
   return `${workflowInstanceId}:step:${sequence}`;
 }
 
+function toolInvocationId(workflowStepId: string, toolName: string): string {
+  return `${workflowStepId}:tool:${toolName}`;
+}
+
 function workflowApprovalId(workflowStepId: string): string {
   return `${workflowStepId}:approval`;
 }
 
+function toolApprovalId(toolInvocationId: string): string {
+  return `${toolInvocationId}:approval`;
+}
+
 function auditId(workflowInstanceId: string, name: string): string {
   return `${workflowInstanceId}:audit:${name}`;
+}
+
+function toolOutputRef(workflowInstanceId: string, sequence: number, toolName: string): string {
+  return `mock://workflow/${workflowInstanceId}/steps/${sequence}/tools/${toolName}/output`;
 }
 
 function isTerminalWorkflowStatus(status: WorkflowInstanceStatus): boolean {
@@ -918,6 +1374,60 @@ function approvalExpiresAt(now: string, expiresIn: string | null): string | null
   const base = Date.parse(now);
   if (!Number.isFinite(base)) return null;
   return new Date(base + value * multiplier).toISOString();
+}
+
+function normalizeAllowedTools(rawTools: unknown): string[] {
+  if (!Array.isArray(rawTools)) return [];
+  return rawTools.filter((tool): tool is string => typeof tool === "string" && tool.trim().length > 0).map((tool) => tool.trim());
+}
+
+function normalizeRiskLevel(value: string | null): ToolRiskLevel | null {
+  if (!value) return null;
+  return ["L0", "L1", "L2", "L3", "L4"].includes(value) ? (value as ToolRiskLevel) : null;
+}
+
+function maxRiskLevel(base: ToolRiskLevel, override: ToolRiskLevel | null): ToolRiskLevel {
+  if (!override) return base;
+  return riskRank(override) > riskRank(base) ? override : base;
+}
+
+function riskRank(riskLevel: ToolRiskLevel): number {
+  return Number(riskLevel.slice(1));
+}
+
+function validateToolInput(schemaJson: string, input: Record<string, unknown>): string | null {
+  const schema = parseToolInputSchema(schemaJson);
+  if (schema === null) return "Tool input schema must be valid JSON";
+  if (!isRecord(schema)) return "Tool input schema must be a JSON object";
+  const required = Array.isArray(schema.required) ? schema.required.filter((field): field is string => typeof field === "string") : [];
+  for (const field of required) {
+    const value = input[field];
+    if (value === undefined || value === null || value === "") return `Tool input missing required field: ${field}`;
+  }
+  const properties = isRecord(schema.properties) ? schema.properties : {};
+  for (const [field, rawRule] of Object.entries(properties)) {
+    const value = input[field];
+    if (value === undefined || value === null || !isRecord(rawRule)) continue;
+    const type = stringProperty(rawRule, "type");
+    if (type && !matchesJsonType(value, type)) return `Tool input field ${field} must be ${type}`;
+  }
+  return null;
+}
+
+function parseToolInputSchema(schemaJson: string): unknown | null {
+  try {
+    return JSON.parse(schemaJson) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function matchesJsonType(value: unknown, type: string): boolean {
+  if (type === "array") return Array.isArray(value);
+  if (type === "object") return isRecord(value);
+  if (type === "integer") return typeof value === "number" && Number.isInteger(value);
+  if (type === "number") return typeof value === "number" && Number.isFinite(value);
+  return typeof value === type;
 }
 
 function shapeWorkflowInstance(row: WorkflowInstanceRow): GenericWorkflowInstance {
@@ -998,7 +1508,44 @@ function stringProperty(record: Record<string, unknown>, key: string): string | 
   return typeof value === "string" && value.trim() ? value : null;
 }
 
+function stringInput(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function recordProperty(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  const value = record[key];
+  return isRecord(value) ? value : null;
+}
+
 function numberProperty(record: Record<string, unknown>, key: string): number | null {
   const value = record[key];
   return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+async function buildIdempotencyKey(
+  ticket: Ticket,
+  workflowInstanceId: string,
+  workflowStepId: string,
+  toolName: string,
+  input: Record<string, unknown>,
+): Promise<string> {
+  const digest = await sha256Hex(stableJson(input));
+  return `idem:g7:${ticket.tenantId}:${ticket.id}:${workflowInstanceId}:${workflowStepId}:${toolName}:${digest}`;
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
