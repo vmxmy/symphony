@@ -34,11 +34,15 @@ const SLUG = "profile";
 const EXTERNAL_ID = "issue-1";
 const ATTEMPT = 0;
 const RUN_ID = `run:${TENANT_ID}:${SLUG}:${EXTERNAL_ID}:${ATTEMPT}`;
-const ISSUE_ID = `${TENANT_ID}/${SLUG}:${EXTERNAL_ID}`;
 const PROFILE_ID = `${TENANT_ID}/${SLUG}`;
-const WORKFLOW_INSTANCE_ID = RUN_ID;
+const WORKFLOW_INSTANCE_ID = "run-tenant-profile-issue-1-0";
 
-function seedTenantProfileIssue(db: ReturnType<typeof createMigratedDatabase>) {
+function seedTenantProfileIssue(
+  db: ReturnType<typeof createMigratedDatabase>,
+  opts: { profileId?: string } = {},
+) {
+  const profileId = opts.profileId ?? PROFILE_ID;
+  const issueId = `${profileId}:${EXTERNAL_ID}`;
   db.query(`
     INSERT INTO tenants (id, name, status, policy_json, created_at, updated_at)
     VALUES (?, ?, 'active', '{}', '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z')
@@ -51,7 +55,7 @@ function seedTenantProfileIssue(db: ReturnType<typeof createMigratedDatabase>) {
     ) VALUES (?, ?, ?, '1.0.0', 'linear', 'cloudflare-agent-native', 'active',
       '{}', 1, 2, '[]', '2026-05-03T00:00:00Z',
       '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z')
-  `).run(PROFILE_ID, TENANT_ID, SLUG);
+  `).run(profileId, TENANT_ID, SLUG);
   db.query(`
     INSERT INTO issues (
       id, tenant_id, profile_id, external_id, identifier, title, state,
@@ -59,7 +63,7 @@ function seedTenantProfileIssue(db: ReturnType<typeof createMigratedDatabase>) {
     ) VALUES (?, ?, ?, ?, 'SYM-1', 'Test issue', 'Todo',
       '{}', '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z',
       '2026-05-03T00:00:00Z', '2026-05-03T00:00:00Z')
-  `).run(ISSUE_ID, TENANT_ID, PROFILE_ID, EXTERNAL_ID);
+  `).run(issueId, TENANT_ID, profileId, EXTERNAL_ID);
 }
 
 function fakeR2() {
@@ -243,5 +247,51 @@ describe("ExecutionWorkflow end-to-end (Phase 5 PR-C)", () => {
 
     // IssueAgent.onRunFinished called exactly once with completed
     expect(onRunFinishedCalls).toEqual([{ outcome: "completed" }]);
+  });
+
+  test("resolves versioned profile id from tenant and slug before associating run", async () => {
+    const db = createMigratedDatabase();
+    const versionedProfileId = `${TENANT_ID}/${SLUG}@1.0.0`;
+    seedTenantProfileIssue(db, { profileId: versionedProfileId });
+    const r2 = fakeR2();
+    const env = {
+      DB: asD1(db),
+      ARTIFACTS: r2.bucket,
+      ISSUE_AGENT: fakeIssueAgentNamespace({
+        agentStatus: "running",
+        agentLease: WORKFLOW_INSTANCE_ID,
+        recordOnRunFinished: () => {},
+      }),
+    };
+    const workflow = new ExecutionWorkflow(
+      {} as unknown as ConstructorParameters<typeof ExecutionWorkflow>[0],
+      env as unknown as ConstructorParameters<typeof ExecutionWorkflow>[1],
+    );
+
+    await workflow.run(
+      {
+        payload: {
+          tenant_id: TENANT_ID,
+          slug: SLUG,
+          external_id: EXTERNAL_ID,
+          identifier: "SYM-1",
+          attempt: ATTEMPT,
+          workflow_instance_id: WORKFLOW_INSTANCE_ID,
+        },
+      } as unknown as Parameters<typeof workflow.run>[0],
+      fakeStep() as unknown as Parameters<typeof workflow.run>[1],
+    );
+
+    const runRow = db
+      .query(`SELECT id, issue_id, status, workflow_id FROM runs WHERE id = ?`)
+      .get(RUN_ID) as
+      | { id: string; issue_id: string; status: string; workflow_id: string }
+      | null;
+    expect(runRow).toEqual({
+      id: RUN_ID,
+      issue_id: `${versionedProfileId}:${EXTERNAL_ID}`,
+      status: "completed",
+      workflow_id: WORKFLOW_INSTANCE_ID,
+    });
   });
 });

@@ -205,7 +205,7 @@ describe("retry loop", () => {
       slug: IDS.slug,
       external_id: IDS.externalId,
       identifier: IDS.externalId,
-      attempt: 0,
+      attempt: 1,
       scheduled_at: new Date().toISOString(),
     });
 
@@ -217,18 +217,19 @@ describe("retry loop", () => {
     });
     expect(harness.readState()).toMatchObject({
       status: "running",
-      workflow_instance_id: "run:tenant:profile:issue-1:0",
+      attempt: 1,
+      workflow_instance_id: "run-tenant-profile-issue-1-1",
     });
     expect(harness.workflowCreates).toHaveLength(1);
     expect(harness.workflowCreates[0]).toMatchObject({
-      id: "run:tenant:profile:issue-1:0",
+      id: "run-tenant-profile-issue-1-1",
       params: {
         tenant_id: IDS.tenantId,
         slug: IDS.slug,
         external_id: IDS.externalId,
         identifier: IDS.externalId,
-        attempt: 0,
-        workflow_instance_id: "run:tenant:profile:issue-1:0",
+        attempt: 1,
+        workflow_instance_id: "run-tenant-profile-issue-1-1",
       },
     });
   });

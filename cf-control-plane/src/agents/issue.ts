@@ -23,6 +23,7 @@ import { DurableObject } from "cloudflare:workers";
 import { nextBackoffMs } from "./backoff.js";
 import { assertControlPlaneId } from "../identity.js";
 import type { IssueDispatchMessage } from "../queues/types.js";
+import { executionWorkflowInstanceId } from "../workflows/ids.js";
 
 export type IssueAgentStatus =
   | "discovered"
@@ -251,7 +252,12 @@ export class IssueAgent extends DurableObject<Env> {
       throw new Error(`issue_startrun_invalid_state: ${current.status}`);
     }
 
-    const instanceId = `run:${tenantId}:${slug}:${externalId}:${current.attempt}`;
+    const instanceId = executionWorkflowInstanceId(
+      tenantId,
+      slug,
+      externalId,
+      current.attempt,
+    );
     const params = {
       tenant_id: tenantId,
       slug,
@@ -330,6 +336,7 @@ export class IssueAgent extends DurableObject<Env> {
     externalId: string,
     decidedBy?: string,
     reason?: string,
+    attempt?: number,
   ): Promise<IssueAgentState> {
     assertControlPlaneId("tenant", tenantId);
     assertControlPlaneId("profile", slug);
@@ -339,6 +346,22 @@ export class IssueAgent extends DurableObject<Env> {
     if (current.status === "running" && current.workflow_instance_id) return current;
 
     const state = await this.transition(tenantId, slug, externalId, "queued", decidedBy, reason);
+    const nextAttempt =
+      attempt !== undefined && Number.isInteger(attempt) && attempt > state.attempt ?
+        attempt
+      : state.attempt;
+    if (nextAttempt !== state.attempt) {
+      const updated: IssueAgentState = {
+        ...state,
+        attempt: nextAttempt,
+        updatedAt: new Date().toISOString(),
+        decidedBy,
+        reason,
+      };
+      await this.ctx.storage.put("state", updated);
+      await this.deleteRetryMirror(tenantId, slug, externalId);
+      return updated;
+    }
     await this.deleteRetryMirror(tenantId, slug, externalId);
     return state;
   }
