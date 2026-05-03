@@ -22,6 +22,8 @@ import type { ExecutionWorkflowParams } from "./workflows/execution.js";
 import { executeMockRun } from "./orchestration/mock_run.js";
 import { renderDashboard, renderRunDetail } from "./dashboard/render.js";
 import type { DashboardState, ProfileView, RetryView, TenantView } from "./dashboard/render.js";
+import { renderApprovalCenter, renderTicketDetail, renderTicketInbox } from "./dashboard/control_center.js";
+import { loadApprovalCenter, loadTicketDetail, loadTicketInbox } from "./dashboard/control_center_data.js";
 import {
   authenticateOperator,
   requireCapability,
@@ -202,6 +204,19 @@ async function readiness(env: Env): Promise<{ ready: boolean; db: { ok: boolean;
   return { ready: db.ok && operatorToken, db, operatorToken };
 }
 
+function tenantScopeFromRequest(
+  url: URL,
+  principal: { tenantId: string | null },
+): { ok: true; tenantId: string } | { ok: false; response: Response } {
+  const queryTenantId = url.searchParams.get("tenantId")?.trim() ?? null;
+  if (principal.tenantId && queryTenantId && principal.tenantId !== queryTenantId) {
+    return { ok: false, response: new Response("tenant forbidden", { status: 403 }) };
+  }
+  const tenantId = principal.tenantId ?? queryTenantId;
+  if (!tenantId) return { ok: false, response: new Response("missing tenantId", { status: 400 }) };
+  return { ok: true, tenantId };
+}
+
 async function loadDashboardState(env: Env): Promise<DashboardState> {
   const [tenants, profiles, runsRes, issuesRes, retriesRes] = await Promise.all([
     listTenants(env),
@@ -316,6 +331,58 @@ export default {
       }
       const html = renderDashboard(await loadDashboardState(env));
       return new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
+    const ticketDetailPage = url.pathname.match(/^\/tickets\/([^/]+)$/);
+    if (url.pathname === "/tickets" || url.pathname === "/approvals" || ticketDetailPage) {
+      if (req.method !== "GET") return methodNotAllowed(["GET"]);
+      const session = await authenticateOperator(req, env.OPERATOR_TOKEN, {
+        allowCookie: true,
+        allowQuery: true,
+        jsonErrors: false,
+      });
+      if (!session.ok) return session.response;
+      const denied = requireCapability(session.principal, "ticket.read");
+      if (denied) return denied;
+      if (session.principal.sessionSource === "query") {
+        const redirectUrl = new URL(req.url);
+        redirectUrl.searchParams.delete("token");
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: redirectUrl.pathname + redirectUrl.search,
+            "set-cookie": await sessionCookieHeader(env.OPERATOR_TOKEN!),
+          },
+        });
+      }
+
+      const tenantScope = tenantScopeFromRequest(url, session.principal);
+      if (!tenantScope.ok) return tenantScope.response;
+      const { tenantId } = tenantScope;
+
+      const generatedAt = new Date().toISOString();
+      if (url.pathname === "/tickets") {
+        const html = renderTicketInbox(await loadTicketInbox(env.DB, tenantId, generatedAt));
+        return new Response(html, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url.pathname === "/approvals") {
+        const html = renderApprovalCenter(await loadApprovalCenter(env.DB, tenantId, generatedAt));
+        return new Response(html, {
+          status: 200,
+          headers: { "content-type": "text/html; charset=utf-8" },
+        });
+      }
+
+      const detail = await loadTicketDetail(env.DB, tenantId, decodeURIComponent(ticketDetailPage![1]!), generatedAt);
+      if (!detail) return notFound();
+      return new Response(renderTicketDetail(detail), {
         status: 200,
         headers: { "content-type": "text/html; charset=utf-8" },
       });
