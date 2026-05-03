@@ -72,6 +72,7 @@ function request(method: string, path: string, body?: unknown, headers: Record<s
     method,
     headers: {
       Authorization: `Bearer ${TOKEN}`,
+      "X-Symphony-Tenant": "tenant_1",
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...headers,
     },
@@ -214,14 +215,51 @@ describe("G3 Ticket API v2 routes", () => {
     );
 
     expect(res.status).toBe(202);
-    const body = (await res.json()) as { event: { action: string; actorType: string; payloadRef: string } };
+    const body = (await res.json()) as { event: { action: string; actorType: string; actorId: string; payloadRef: string } };
     expect(body.event.action).toBe("ticket.event.received");
     expect(body.event.actorType).toBe("connector");
+    expect(body.event.actorId).toBe("operator-token");
     expect(JSON.parse(body.event.payloadRef)).toMatchObject({
       type: "external_response_received",
       correlationKey: "vendor-docs",
     });
     expect(tableCount(db, "audit_events", "action = 'ticket.event.received'")).toBe(1);
+    expect(tableCount(db, "ticket_comments")).toBe(0);
+  });
+
+  test("tenant scope and source namespace rules protect v2 tickets", async () => {
+    const db = createMigratedDatabase();
+    const env = makeEnv(db);
+
+    const reservedSource = await createTicket(env, {
+      source: { kind: "linear", externalId: "lin_1", externalKey: "SYM-1" },
+    });
+    expect(reservedSource.status).toBe(400);
+    expect((await reservedSource.json()) as { error: string }).toMatchObject({ error: "reserved_source_kind" });
+    expect(tableCount(db, "tickets")).toBe(0);
+
+    const forbiddenTenant = await worker.fetch(
+      request("POST", "/api/v2/tickets", {
+        tenantId: "tenant_2",
+        type: "vendor_review",
+        title: "Wrong tenant",
+        workflowKey: "vendor-due-diligence",
+      }),
+      env,
+      {},
+    );
+    expect(forbiddenTenant.status).toBe(403);
+    expect((await forbiddenTenant.json()) as { error: string }).toMatchObject({ error: "tenant_forbidden" });
+
+    const created = await createTicket(env);
+    const { ticketId } = (await created.json()) as { ticketId: string };
+    const forbiddenDetail = await worker.fetch(
+      request("GET", `/api/v2/tickets/${ticketId}`, undefined, { "X-Symphony-Tenant": "tenant_2" }),
+      env,
+      {},
+    );
+    expect(forbiddenDetail.status).toBe(403);
+    expect((await forbiddenDetail.json()) as { error: string }).toMatchObject({ error: "ticket_tenant_forbidden" });
   });
 
   test("invalid input, not found, auth, and method errors use JSON error responses", async () => {
@@ -229,7 +267,7 @@ describe("G3 Ticket API v2 routes", () => {
     const env = makeEnv(db);
 
     const invalidCreate = await worker.fetch(
-      request("POST", "/api/v2/tickets", { type: "vendor_review", workflowKey: "vendor-due-diligence" }),
+      request("POST", "/api/v2/tickets", { tenantId: "tenant_1", type: "vendor_review", workflowKey: "vendor-due-diligence" }),
       env,
       {},
     );

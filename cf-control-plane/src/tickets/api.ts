@@ -4,6 +4,7 @@ import type { Ticket, TicketPriority, TicketSource, TicketStatus } from "./types
 
 const TICKET_PRIORITIES = new Set<TicketPriority>(["low", "normal", "high", "urgent"]);
 const COMMENT_VISIBILITIES = new Set(["internal", "external_sync"]);
+const DIRECT_CREATE_SOURCES = new Set(["api", "manual"]);
 
 export async function handleTicketApiV2(req: Request, db: D1Database, principal: Principal): Promise<Response> {
   const url = new URL(req.url);
@@ -17,7 +18,7 @@ export async function handleTicketApiV2(req: Request, db: D1Database, principal:
   const ticketRoute = url.pathname.match(/^\/api\/v2\/tickets\/([^/]+)$/);
   if (ticketRoute) {
     if (req.method !== "GET") return methodNotAllowed(["GET"]);
-    return getTicketDetail(db, principal, decodeURIComponent(ticketRoute[1]!));
+    return getTicketDetail(req, db, principal, decodeURIComponent(ticketRoute[1]!));
   }
 
   const commentRoute = url.pathname.match(/^\/api\/v2\/tickets\/([^/]+)\/comments$/);
@@ -36,14 +37,16 @@ export async function handleTicketApiV2(req: Request, db: D1Database, principal:
 }
 
 async function createTicket(req: Request, db: D1Database, principal: Principal): Promise<Response> {
-  const denied = requireCapability(principal, "write:ticket");
+  const denied = requireCapability(principal, "ticket.create");
   if (denied) return denied;
 
   const parsed = await readJsonObject(req);
   if (!parsed.ok) return parsed.response;
 
   const body = parsed.value;
-  const tenantId = stringField(body, "tenantId") ?? "default";
+  const tenant = requiredTenant(body, principal);
+  if (!tenant.ok) return tenant.response;
+  const tenantId = tenant.value;
   const type = requiredStringField(body, "type");
   const title = requiredStringField(body, "title");
   const workflowKey = requiredStringField(body, "workflowKey");
@@ -56,6 +59,12 @@ async function createTicket(req: Request, db: D1Database, principal: Principal):
 
   const source = sourceFields(body.source);
   if (!source.ok) return source.response;
+  if (!DIRECT_CREATE_SOURCES.has(source.value.kind)) {
+    return jsonResponse(
+      { error: "reserved_source_kind", allowed: [...DIRECT_CREATE_SOURCES] },
+      { status: 400 },
+    );
+  }
 
   const now = new Date().toISOString();
   const ticketId = crypto.randomUUID();
@@ -109,20 +118,24 @@ async function createTicket(req: Request, db: D1Database, principal: Principal):
 }
 
 async function listTickets(url: URL, db: D1Database, principal: Principal): Promise<Response> {
-  const denied = requireCapability(principal, "read:state");
+  const denied = requireCapability(principal, "ticket.read");
   if (denied) return denied;
 
   const filters: string[] = ["archived_at IS NULL"];
   const params: Array<string | number | null> = [];
-  const tenantId = url.searchParams.get("tenantId");
+  const tenantParam = url.searchParams.get("tenantId")?.trim() || null;
+  if (!tenantParam) {
+    return jsonResponse({ error: "missing_tenant_scope", field: "tenantId" }, { status: 400 });
+  }
+  const tenantDenied = authorizeTenant(principal, tenantParam);
+  if (tenantDenied) return tenantDenied;
+  const tenantId = tenantParam;
   const status = url.searchParams.get("status");
   const workflowKey = url.searchParams.get("workflowKey");
   const limit = boundedLimit(url.searchParams.get("limit"));
 
-  if (tenantId) {
-    filters.push("tenant_id = ?");
-    params.push(tenantId);
-  }
+  filters.push("tenant_id = ?");
+  params.push(tenantId);
   if (status) {
     filters.push("status = ?");
     params.push(status);
@@ -146,12 +159,14 @@ async function listTickets(url: URL, db: D1Database, principal: Principal): Prom
   return jsonResponse({ tickets: (results ?? []).map((row) => shapeTicket(ticketFromRow(row))) });
 }
 
-async function getTicketDetail(db: D1Database, principal: Principal, ticketId: string): Promise<Response> {
-  const denied = requireCapability(principal, "read:state");
+async function getTicketDetail(req: Request, db: D1Database, principal: Principal, ticketId: string): Promise<Response> {
+  const denied = requireCapability(principal, "ticket.read");
   if (denied) return denied;
 
   const ticket = await getTicketById(db, ticketId);
   if (!ticket || ticket.archivedAt) return notFound();
+  const tenantDenied = authorizeTicketRequest(principal, ticket, new URL(req.url).searchParams);
+  if (tenantDenied) return tenantDenied;
 
   const [sources, comments, activeWorkflow, currentWaitingItem, artifactCount, recentAudits] = await Promise.all([
     listSources(db, ticketId),
@@ -174,7 +189,7 @@ async function getTicketDetail(db: D1Database, principal: Principal, ticketId: s
 }
 
 async function addTicketComment(req: Request, db: D1Database, principal: Principal, ticketId: string): Promise<Response> {
-  const denied = requireCapability(principal, "write:ticket");
+  const denied = requireCapability(principal, "ticket.comment");
   if (denied) return denied;
 
   const ticket = await getTicketById(db, ticketId);
@@ -184,6 +199,9 @@ async function addTicketComment(req: Request, db: D1Database, principal: Princip
   if (!parsed.ok) return parsed.response;
 
   const body = parsed.value;
+  const tenantDenied = authorizeTicketRequest(principal, ticket, new URL(req.url).searchParams, body);
+  if (tenantDenied) return tenantDenied;
+
   const bodyText = requiredStringField(body, "body");
   if (!bodyText.ok) return bodyText.response;
 
@@ -199,6 +217,7 @@ async function addTicketComment(req: Request, db: D1Database, principal: Princip
 
   const now = new Date().toISOString();
   const commentId = crypto.randomUUID();
+  const authorId = nullableStringField(body, "authorId") ?? principal.subject;
   await db
     .prepare(
       `INSERT INTO ticket_comments (
@@ -210,7 +229,7 @@ async function addTicketComment(req: Request, db: D1Database, principal: Princip
       ticket.tenantId,
       ticket.id,
       authorType,
-      nullableStringField(body, "authorId") ?? principal.subject,
+      authorId,
       bodyText.value,
       visibility,
       nullableStringField(body, "sourceId"),
@@ -222,7 +241,7 @@ async function addTicketComment(req: Request, db: D1Database, principal: Princip
     tenantId: ticket.tenantId,
     ticketId: ticket.id,
     actorType: authorType,
-    actorId: nullableStringField(body, "authorId") ?? principal.subject,
+    actorId: authorId,
     action: "ticket.comment.created",
     summary: `Comment added to ${ticket.key}`,
     createdAt: now,
@@ -232,7 +251,7 @@ async function addTicketComment(req: Request, db: D1Database, principal: Princip
 }
 
 async function addTicketEvent(req: Request, db: D1Database, principal: Principal, ticketId: string): Promise<Response> {
-  const denied = requireCapability(principal, "write:ticket");
+  const denied = requireCapability(principal, "connector.ingest");
   if (denied) return denied;
 
   const ticket = await getTicketById(db, ticketId);
@@ -242,6 +261,9 @@ async function addTicketEvent(req: Request, db: D1Database, principal: Principal
   if (!parsed.ok) return parsed.response;
 
   const body = parsed.value;
+  const tenantDenied = authorizeTicketRequest(principal, ticket, new URL(req.url).searchParams, body);
+  if (tenantDenied) return tenantDenied;
+
   const eventType = requiredStringField(body, "type");
   if (!eventType.ok) return eventType.response;
 
@@ -250,7 +272,7 @@ async function addTicketEvent(req: Request, db: D1Database, principal: Principal
     tenantId: ticket.tenantId,
     ticketId: ticket.id,
     actorType: "connector",
-    actorId: stringField(body, "correlationKey") ?? principal.subject,
+    actorId: principal.subject,
     action: "ticket.event.received",
     summary: `External event received: ${eventType.value}`,
     payloadRef: JSON.stringify({
@@ -577,6 +599,40 @@ function shapeAuditEvent(row: AuditEventRow) {
     payloadRef: row.payload_ref,
     createdAt: row.created_at,
   };
+}
+
+function requiredTenant(
+  body: Record<string, unknown>,
+  principal: Principal,
+): { ok: true; value: string } | { ok: false; response: Response } {
+  const tenantId = stringField(body, "tenantId");
+  if (!tenantId) {
+    return { ok: false, response: jsonResponse({ error: "missing_tenant_scope", field: "tenantId" }, { status: 400 }) };
+  }
+  const denied = authorizeTenant(principal, tenantId);
+  if (denied) return { ok: false, response: denied };
+  return { ok: true, value: tenantId };
+}
+
+function authorizeTicketRequest(
+  principal: Principal,
+  ticket: Ticket,
+  query: URLSearchParams,
+  body: Record<string, unknown> = {},
+): Response | null {
+  const tenantId = principal.tenantId ?? query.get("tenantId")?.trim() ?? stringField(body, "tenantId");
+  if (!tenantId) return jsonResponse({ error: "missing_tenant_scope", field: "tenantId" }, { status: 400 });
+  if (tenantId !== ticket.tenantId) {
+    return jsonResponse({ error: "ticket_tenant_forbidden" }, { status: 403 });
+  }
+  return authorizeTenant(principal, tenantId);
+}
+
+function authorizeTenant(principal: Principal, tenantId: string): Response | null {
+  if (principal.tenantId && principal.tenantId !== tenantId) {
+    return jsonResponse({ error: "tenant_forbidden" }, { status: 403 });
+  }
+  return null;
 }
 
 async function readJsonObject(req: Request): Promise<{ ok: true; value: Record<string, unknown> } | { ok: false; response: Response }> {
