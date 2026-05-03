@@ -201,6 +201,18 @@ function approvalWorkflowSteps(): WorkflowStepSeed[] {
   ];
 }
 
+function codingWorkflowSteps(input: Record<string, unknown> = {}): WorkflowStepSeed[] {
+  return [
+    {
+      id: "coding_run",
+      type: "coding_agent_run",
+      input,
+      goal: "Reference the existing coding execution adapter as a compatibility step.",
+    },
+    { id: "deliver", type: "action", goal: "Deliver the coding adapter reference." },
+  ];
+}
+
 function artifactWorkflowSteps(input: Record<string, unknown> = { kind: "report", mimeType: "application/json", metadata: { source: "test" } }): WorkflowStepSeed[] {
   return [
     { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
@@ -234,6 +246,11 @@ function auditActions(db: SqliteDb): string[] {
     .query(`SELECT action FROM audit_events ORDER BY created_at, id`)
     .all()
     .map((row) => String((row as { action: string }).action));
+}
+
+function auditPayload(db: SqliteDb, action: string): Record<string, unknown> | null {
+  const row = db.query(`SELECT payload_ref FROM audit_events WHERE action = ? ORDER BY created_at, id LIMIT 1`).get(action) as { payload_ref: string | null } | null;
+  return row?.payload_ref ? (JSON.parse(row.payload_ref) as Record<string, unknown>) : null;
 }
 
 function approvalRow(db: SqliteDb) {
@@ -583,6 +600,56 @@ describe("GenericTicketWorkflow generic ticket runtime", () => {
     expect((await forbidden.json()) as { error: string }).toMatchObject({ error: "tenant_forbidden" });
     expect((approvalRow(db) as { status: string }).status).toBe("pending");
     expect(auditActions(db)).not.toContain("approval.decided");
+  });
+
+  test("coding_agent_run references the coding adapter without making coding runtime mandatory", async () => {
+    const db = createMigratedDatabase();
+    seedWorkflowDefinition(
+      db,
+      codingWorkflowSteps({
+        adapterKind: "codex_compat",
+        profileSlug: "eng",
+        externalId: "SYM-42",
+        identifier: "SYM-42",
+        attempt: 2,
+      }),
+    );
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { workflowInstanceId: string; status: string };
+    expect(body.status).toBe("COMPLETED");
+    expect(tableCount(db, "runs")).toBe(0);
+    expect(tableCount(db, "run_steps")).toBe(0);
+    expect(tableCount(db, "tool_calls")).toBe(0);
+    expect(tableCount(db, "agent_sessions")).toBe(0);
+
+    const steps = db.query(`SELECT step_key, step_type, status, output_ref, summary FROM workflow_steps ORDER BY sequence`).all() as Array<{
+      step_key: string;
+      step_type: string;
+      status: string;
+      output_ref: string | null;
+      summary: string;
+    }>;
+    expect(steps.map((step) => [step.step_key, step.step_type, step.status])).toEqual([
+      ["coding_run", "coding_agent_run", "completed"],
+      ["deliver", "action", "completed"],
+    ]);
+    expect(steps[0]?.output_ref).toBe("coding-agent-run://run%3Atenant_1%3Aeng%3ASYM-42%3A2");
+    expect(steps[0]?.summary).toContain("codex_compat");
+
+    const payload = auditPayload(db, "coding_agent_run.referenced");
+    expect(payload).toMatchObject({
+      kind: "coding_agent_run",
+      runId: "run:tenant_1:eng:SYM-42:2",
+      issueId: "tenant_1/eng:SYM-42",
+      adapterKind: "codex_compat",
+      workflowInstanceId: body.workflowInstanceId,
+    });
+    expect(payload).not.toHaveProperty("workspaceRef");
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["coding_agent_run.referenced", "workflow.completed"]));
   });
 
   test("ToolGateway executes allowed artifact.create with schema, idempotency, metadata, and audit evidence", async () => {

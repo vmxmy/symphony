@@ -3,6 +3,10 @@ import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 
 import { getTicketById } from "../tickets/store.js";
 import type { Ticket, TicketStatus } from "../tickets/types.js";
+import {
+  buildCodingAgentRunReference,
+  codingAgentRunOutputRef,
+} from "./coding_agent_run.js";
 
 export type WorkflowInstanceStatus =
   | "created"
@@ -609,6 +613,11 @@ async function runGenericWorkflowStep(
     return runToolGatewayStep(db, ticket, workflowInstanceId, definition, stepId, stepDefinition, sequence, now);
   }
 
+  if (stepDefinition.type === "coding_agent_run") {
+    await completeCodingAgentRunStep(db, ticket, workflowInstanceId, stepId, stepDefinition, sequence, now);
+    return { status: "completed" };
+  }
+
   if (stepDefinition.type === "agent") {
     await recordMockAgentSession(db, ticket, workflowInstanceId, stepDefinition, sequence, now);
   }
@@ -642,6 +651,62 @@ async function runGenericWorkflowStep(
   });
 
   return { status: "completed" };
+}
+
+async function completeCodingAgentRunStep(
+  db: D1Database,
+  ticket: Ticket,
+  workflowInstanceId: string,
+  stepId: string,
+  stepDefinition: WorkflowStepDefinition,
+  sequence: number,
+  now: string,
+): Promise<void> {
+  const reference = buildCodingAgentRunReference({
+    ticket,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    stepInput: stepDefinition.input,
+  });
+  const outputRef = codingAgentRunOutputRef(reference);
+  const payloadRef = JSON.stringify(reference);
+
+  await db
+    .prepare(
+      `UPDATE workflow_steps
+          SET status = 'completed', output_ref = ?, summary = ?, completed_at = ?, error_message = NULL
+        WHERE id = ?`,
+    )
+    .bind(outputRef, `Referenced coding adapter run ${reference.runId} (${reference.adapterKind})`, now, stepId)
+    .run();
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.coding_agent_run.referenced`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "coding-workflow-adapter",
+    action: "coding_agent_run.referenced",
+    summary: `Coding adapter run referenced for ${stepDefinition.id}`,
+    payloadRef,
+    createdAt: now,
+  });
+
+  await insertAuditEventOnce(db, {
+    id: auditId(workflowInstanceId, `step.${sequence}.completed`),
+    tenantId: ticket.tenantId,
+    ticketId: ticket.id,
+    workflowInstanceId,
+    workflowStepId: stepId,
+    actorType: "system",
+    actorId: "coding-workflow-adapter",
+    action: "workflow.step.completed",
+    summary: `Step ${stepDefinition.id} completed`,
+    payloadRef: outputRef,
+    createdAt: now,
+  });
 }
 
 async function runToolGatewayStep(
