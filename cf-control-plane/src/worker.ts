@@ -39,6 +39,7 @@ import { assertControlPlaneId, durableObjectName } from "./identity.js";
 import { runScheduledPoll, enqueueScheduledPolls } from "./orchestration/scheduled_poll.js";
 import { handleTicketApiV2 } from "./tickets/api.js";
 import { handleTrackerRefresh, handleIssueDispatch } from "./queues/handlers.js";
+import { isDispatchQueue, isTrackerEventsQueue } from "./queues/names.js";
 import { parseRuntimeConfig } from "./runtime/factory.js";
 import type {
   TrackerRefreshMessage,
@@ -1230,7 +1231,7 @@ export default {
     // max_retries then routes to the DLQ.
     for (const message of batch.messages) {
       try {
-        if (batch.queue === "symphony-tracker-events" && message.body.kind === "tracker.refresh") {
+        if (isTrackerEventsQueue(batch.queue) && message.body.kind === "tracker.refresh") {
           const outcome = await handleTrackerRefresh(env, message.body);
           console.log(
             JSON.stringify({
@@ -1243,7 +1244,7 @@ export default {
           message.ack();
           continue;
         }
-        if (batch.queue === "symphony-dispatch" && message.body.kind === "issue.dispatch") {
+        if (isDispatchQueue(batch.queue) && message.body.kind === "issue.dispatch") {
           const outcome = await handleIssueDispatch(env, message.body);
           console.log(
             JSON.stringify({
