@@ -111,6 +111,8 @@ async function createVendorTicket(env: ReturnType<typeof makeEnv>) {
 type WorkflowStepSeed = {
   id: string;
   type: string;
+  tool?: string;
+  input?: Record<string, unknown>;
   role?: string;
   goal?: string;
   approver_group?: string;
@@ -119,7 +121,7 @@ type WorkflowStepSeed = {
   expires_in?: string;
 };
 
-function seedWorkflowDefinition(db: SqliteDb, steps: WorkflowStepSeed[] = defaultWorkflowSteps()) {
+function seedWorkflowDefinition(db: SqliteDb, steps: WorkflowStepSeed[] = defaultWorkflowSteps(), tools: string[] = []) {
   db.query(
     `INSERT INTO workflow_definitions (
        id, tenant_id, key, version, name, status, definition_json, source_ref, created_at, updated_at
@@ -134,9 +136,42 @@ function seedWorkflowDefinition(db: SqliteDb, steps: WorkflowStepSeed[] = defaul
       key: "vendor-due-diligence",
       name: "Vendor Due Diligence",
       version: 1,
+      tools,
       steps,
     }),
     "test://workflow-definitions/vendor-due-diligence/v1",
+    "2026-05-03T00:00:00.000Z",
+    "2026-05-03T00:00:00.000Z",
+  );
+}
+
+function seedToolDefinition(
+  db: SqliteDb,
+  input: {
+    name: string;
+    riskLevel: "L0" | "L1" | "L2" | "L3" | "L4";
+    requiresApproval?: boolean;
+    idempotencyRequired?: boolean;
+    handler?: string;
+    inputSchema?: Record<string, unknown>;
+  },
+) {
+  db.query(
+    `INSERT INTO tool_definitions (
+       id, tenant_id, name, description, input_schema_json, output_schema_json,
+       risk_level, requires_approval, idempotency_required, handler, status,
+       created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, 'active', ?, ?)`,
+  ).run(
+    `tool_${input.name.replace(/[^A-Za-z0-9]/g, "_")}`,
+    TENANT,
+    input.name,
+    `Test definition for ${input.name}`,
+    JSON.stringify(input.inputSchema ?? { type: "object" }),
+    input.riskLevel,
+    input.requiresApproval ? 1 : 0,
+    input.idempotencyRequired ? 1 : 0,
+    input.handler ?? input.name,
     "2026-05-03T00:00:00.000Z",
     "2026-05-03T00:00:00.000Z",
   );
@@ -161,6 +196,30 @@ function approvalWorkflowSteps(): WorkflowStepSeed[] {
       action: "vendor_due_diligence.plan_approval",
       risk_level: "medium",
       expires_in: "2 days",
+    },
+    { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
+  ];
+}
+
+function artifactWorkflowSteps(input: Record<string, unknown> = { kind: "report", mimeType: "application/json", metadata: { source: "test" } }): WorkflowStepSeed[] {
+  return [
+    { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
+    { id: "create_artifact", type: "tool", tool: "artifact.create", input },
+    { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
+  ];
+}
+
+function webhookWorkflowSteps(toolStepOverrides: Partial<WorkflowStepSeed> = {}): WorkflowStepSeed[] {
+  return [
+    { id: "intake", type: "agent", role: "intake", goal: "Validate vendor request completeness." },
+    {
+      id: "call_webhook",
+      type: "tool",
+      tool: "webhook.call",
+      input: { url: "https://example.invalid/webhook", payload: { vendor: "ACME" } },
+      approver_group: "security",
+      expires_in: "1 day",
+      ...toolStepOverrides,
     },
     { id: "deliver", type: "action", goal: "Deliver the mock due diligence summary." },
   ];
@@ -192,6 +251,30 @@ function approvalRow(db: SqliteDb) {
         decision_ref: string | null;
         decided_at: string | null;
       }
+    | null;
+}
+
+function toolInvocationRows(db: SqliteDb) {
+  return db.query(`SELECT * FROM tool_invocations ORDER BY started_at, id`).all() as Array<{
+    id: string;
+    tool_name: string;
+    status: string;
+    risk_level: string;
+    output_ref: string | null;
+    approval_id: string | null;
+    idempotency_key: string | null;
+  }>;
+}
+
+function firstArtifact(db: SqliteDb) {
+  return db.query(`SELECT * FROM artifacts ORDER BY created_at, id LIMIT 1`).get() as
+    | { id: string; kind: string; r2_key: string; mime_type: string; metadata_json: string; created_by: string }
+    | null;
+}
+
+function firstIdempotencyRecord(db: SqliteDb) {
+  return db.query(`SELECT * FROM idempotency_records ORDER BY created_at, idem_key LIMIT 1`).get() as
+    | { idem_key: string; status: string; run_id: string; tool_call_id: string; operation_type: string; result_ref: string | null }
     | null;
 }
 
@@ -500,5 +583,312 @@ describe("GenericTicketWorkflow generic ticket runtime", () => {
     expect((await forbidden.json()) as { error: string }).toMatchObject({ error: "tenant_forbidden" });
     expect((approvalRow(db) as { status: string }).status).toBe("pending");
     expect(auditActions(db)).not.toContain("approval.decided");
+  });
+
+  test("ToolGateway executes allowed artifact.create with schema, idempotency, metadata, and audit evidence", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, {
+      name: "artifact.create",
+      riskLevel: "L2",
+      idempotencyRequired: true,
+      inputSchema: {
+        type: "object",
+        required: ["kind", "mimeType"],
+        properties: {
+          kind: { type: "string" },
+          mimeType: { type: "string" },
+          metadata: { type: "object" },
+        },
+      },
+    });
+    seedWorkflowDefinition(db, artifactWorkflowSteps(), ["artifact.create"]);
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { ticketId: string; workflowInstanceId: string; status: string };
+    expect(body.status).toBe("COMPLETED");
+    expect(tableCount(db, "tool_invocations")).toBe(1);
+    expect(tableCount(db, "idempotency_records")).toBe(1);
+    expect(tableCount(db, "artifacts")).toBe(1);
+    expect(tableCount(db, "tool_calls")).toBe(0);
+
+    const [invocation] = toolInvocationRows(db);
+    expect(invocation).toMatchObject({
+      tool_name: "artifact.create",
+      status: "completed",
+      risk_level: "L2",
+    });
+    expect(invocation?.output_ref).toStartWith("mock-r2://artifacts/");
+    expect(invocation?.idempotency_key).toStartWith(`idem:g7:${TENANT}:${body.ticketId}:`);
+    const outputRef = invocation?.output_ref ?? "";
+
+    const artifact = firstArtifact(db);
+    expect(artifact).toMatchObject({
+      kind: "report",
+      mime_type: "application/json",
+      created_by: "toolgateway",
+    });
+    expect(artifact?.r2_key).toBe(outputRef);
+    expect(JSON.parse(artifact?.metadata_json ?? "{}")).toEqual({ source: "test" });
+
+    const idem = firstIdempotencyRecord(db);
+    expect(idem).toMatchObject({
+      status: "completed",
+      run_id: body.workflowInstanceId,
+      tool_call_id: invocation?.id,
+      operation_type: "artifact.create",
+      result_ref: artifact?.r2_key,
+    });
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["tool.invocation.started", "tool.invocation.completed", "artifact.created"]));
+
+    const replay = await startGenericTicketWorkflowForTicket(asD1(db), body.ticketId, { now: "2026-05-03T00:02:00.000Z" });
+    expect(replay?.instance.id).toBe(body.workflowInstanceId);
+    expect(tableCount(db, "tool_invocations")).toBe(1);
+    expect(tableCount(db, "idempotency_records")).toBe(1);
+    expect(tableCount(db, "artifacts")).toBe(1);
+  });
+
+  test("ToolGateway rejects tools outside the workflow allowlist", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, { name: "artifact.create", riskLevel: "L2", idempotencyRequired: true });
+    seedWorkflowDefinition(db, artifactWorkflowSteps(), []);
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { status: string; workflowInstanceId: string };
+    expect(body.status).toBe("FAILED");
+    const instance = db.query(`SELECT status, error_message FROM workflow_instances WHERE id = ?`).get(body.workflowInstanceId) as { status: string; error_message: string };
+    expect(instance.status).toBe("failed");
+    expect(instance.error_message).toContain("not allowed");
+    expect(tableCount(db, "tool_invocations")).toBe(0);
+    expect(tableCount(db, "artifacts")).toBe(0);
+    expect(auditActions(db)).toContain("workflow.step.failed");
+  });
+
+  test("ToolGateway schema validation fails before artifact metadata is written", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, {
+      name: "artifact.create",
+      riskLevel: "L2",
+      idempotencyRequired: true,
+      inputSchema: { type: "object", required: ["kind", "mimeType"] },
+    });
+    seedWorkflowDefinition(db, artifactWorkflowSteps({ kind: "report" }), ["artifact.create"]);
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { status: string; workflowInstanceId: string };
+    expect(body.status).toBe("FAILED");
+    const step = db.query(`SELECT status, error_message FROM workflow_steps WHERE step_key = 'create_artifact'`).get() as { status: string; error_message: string };
+    expect(step.status).toBe("failed");
+    expect(step.error_message).toContain("missing required field: mimeType");
+    expect(toolInvocationRows(db)[0]).toMatchObject({ tool_name: "artifact.create", status: "failed" });
+    expect(tableCount(db, "artifacts")).toBe(0);
+  });
+
+  test("ToolGateway fails closed when the registered input schema is malformed", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, { name: "artifact.create", riskLevel: "L2", idempotencyRequired: true });
+    db.query(`UPDATE tool_definitions SET input_schema_json = ? WHERE tenant_id = ? AND name = ?`).run("{not-json", TENANT, "artifact.create");
+    seedWorkflowDefinition(db, artifactWorkflowSteps(), ["artifact.create"]);
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { status: string }).status).toBe("FAILED");
+    const step = db.query(`SELECT status, error_message FROM workflow_steps WHERE step_key = 'create_artifact'`).get() as { status: string; error_message: string };
+    expect(step).toMatchObject({
+      status: "failed",
+      error_message: expect.stringContaining("schema must be valid JSON"),
+    });
+    expect(toolInvocationRows(db)[0]).toMatchObject({ tool_name: "artifact.create", status: "failed" });
+    expect(tableCount(db, "artifacts")).toBe(0);
+  });
+
+  test("ToolGateway ignores workflow supplied artifact r2Key overrides", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, { name: "artifact.create", riskLevel: "L2", idempotencyRequired: true });
+    seedWorkflowDefinition(
+      db,
+      artifactWorkflowSteps({ kind: "report", mimeType: "application/json", r2Key: "mock-r2://attacker-controlled/path.json" }),
+      ["artifact.create"],
+    );
+    const env = makeEnv(db);
+
+    const res = await createVendorTicket(env);
+
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { ticketId: string; status: string };
+    expect(body.status).toBe("COMPLETED");
+    const artifact = firstArtifact(db);
+    const invocation = toolInvocationRows(db)[0];
+    expect(artifact?.r2_key).toStartWith(`mock-r2://artifacts/${body.ticketId}/`);
+    expect(artifact?.r2_key).not.toBe("mock-r2://attacker-controlled/path.json");
+    expect(invocation?.output_ref).toBe(artifact?.r2_key);
+  });
+
+  test("ToolGateway blocks replay while a mutating idempotency record is in progress", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, { name: "artifact.create", riskLevel: "L2", idempotencyRequired: true });
+    seedWorkflowDefinition(db, artifactWorkflowSteps(), ["artifact.create"]);
+    const env = makeEnv(db);
+    const created = await createVendorTicket(env);
+    const body = (await created.json()) as { ticketId: string; workflowInstanceId: string };
+    const invocation = toolInvocationRows(db)[0];
+    expect(invocation?.idempotency_key).toBeString();
+
+    db.query(`DELETE FROM artifacts`).run();
+    db.query(`UPDATE idempotency_records SET status = 'in_progress', result_ref = NULL, finalized_at = NULL WHERE idem_key = ?`).run(invocation?.idempotency_key ?? "");
+    db.query(`UPDATE tool_invocations SET status = 'running', output_ref = NULL, completed_at = NULL WHERE id = ?`).run(invocation?.id ?? "");
+    db.query(`UPDATE workflow_steps SET status = 'running', output_ref = NULL, completed_at = NULL WHERE step_key = 'create_artifact'`).run();
+    db.query(`UPDATE workflow_instances SET status = 'running', completed_at = NULL, error_message = NULL WHERE id = ?`).run(body.workflowInstanceId);
+    db.query(`UPDATE tickets SET status = 'RUNNING' WHERE id = ?`).run(body.ticketId);
+
+    const replay = await startGenericTicketWorkflowForTicket(asD1(db), body.ticketId, { now: "2026-05-03T00:03:00.000Z" });
+
+    expect(replay?.ticket.status).toBe("FAILED");
+    expect(toolInvocationRows(db)[0]).toMatchObject({ tool_name: "artifact.create", status: "failed" });
+    expect(firstIdempotencyRecord(db)).toMatchObject({ status: "in_progress", result_ref: null });
+    expect(tableCount(db, "artifacts")).toBe(0);
+    const step = db.query(`SELECT status, error_message FROM workflow_steps WHERE step_key = 'create_artifact'`).get() as { status: string; error_message: string };
+    expect(step).toMatchObject({
+      status: "failed",
+      error_message: expect.stringContaining("idempotency key is already in progress"),
+    });
+  });
+
+  test("L3 ToolGateway path creates approval wait and approved decisions execute through idempotency", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, {
+      name: "webhook.call",
+      riskLevel: "L3",
+      requiresApproval: true,
+      idempotencyRequired: true,
+      inputSchema: { type: "object", required: ["url", "payload"], properties: { url: { type: "string" }, payload: { type: "object" } } },
+    });
+    seedWorkflowDefinition(db, webhookWorkflowSteps(), ["webhook.call"]);
+    const env = makeEnv(db);
+
+    const created = await createVendorTicket(env);
+
+    expect(created.status).toBe(201);
+    const createdBody = (await created.json()) as { ticketId: string; workflowInstanceId: string; status: string };
+    expect(createdBody.status).toBe("WAITING_HUMAN");
+    expect(tableCount(db, "tool_invocations")).toBe(1);
+    expect(tableCount(db, "idempotency_records")).toBe(0);
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
+    expect(toolInvocationRows(db)[0]).toMatchObject({
+      tool_name: "webhook.call",
+      status: "approval_wait",
+      risk_level: "L3",
+    });
+    const approval = approvalRow(db);
+    expect(approval).toMatchObject({
+      status: "pending",
+      approver_group: "security",
+      requested_by: "toolgateway",
+    });
+    expect(JSON.parse(approval?.request_ref ?? "{}")).toMatchObject({
+      riskLevel: "L3",
+      toolName: "webhook.call",
+      effect: expect.stringContaining("ToolGateway"),
+    });
+
+    const approved = await worker.fetch(
+      request("POST", `/api/v2/approvals/${approval?.id}/decision`, {
+        tenantId: TENANT,
+        decision: "approved",
+        comment: "Allowed for test endpoint.",
+      }),
+      env,
+      {},
+    );
+
+    expect(approved.status).toBe(200);
+    const approvedBody = (await approved.json()) as {
+      ticket: { status: string };
+      workflowInstance: { status: string };
+      steps: Array<{ stepKey: string; status: string }>;
+    };
+    expect(approvedBody.ticket.status).toBe("COMPLETED");
+    expect(approvedBody.workflowInstance.status).toBe("completed");
+    expect(approvedBody.steps.map((step) => [step.stepKey, step.status])).toEqual([
+      ["intake", "completed"],
+      ["call_webhook", "completed"],
+      ["deliver", "completed"],
+    ]);
+    expect(toolInvocationRows(db)[0]).toMatchObject({ tool_name: "webhook.call", status: "completed" });
+    expect(firstIdempotencyRecord(db)).toMatchObject({
+      status: "completed",
+      run_id: createdBody.workflowInstanceId,
+      operation_type: "webhook.call",
+    });
+    expect(auditActions(db)).toEqual(expect.arrayContaining(["approval.requested", "approval.decided", "tool.invocation.completed"]));
+  });
+
+  test("L4 ToolGateway risk requires approval even without an explicit requiresApproval flag", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, {
+      name: "webhook.call",
+      riskLevel: "L4",
+      requiresApproval: false,
+      idempotencyRequired: true,
+      inputSchema: { type: "object", required: ["url", "payload"] },
+    });
+    seedWorkflowDefinition(db, webhookWorkflowSteps(), ["webhook.call"]);
+    const env = makeEnv(db);
+
+    const created = await createVendorTicket(env);
+
+    expect(created.status).toBe(201);
+    expect(((await created.json()) as { status: string }).status).toBe("WAITING_HUMAN");
+    expect(toolInvocationRows(db)[0]).toMatchObject({
+      tool_name: "webhook.call",
+      status: "approval_wait",
+      risk_level: "L4",
+    });
+    expect(approvalRow(db)).toMatchObject({
+      status: "pending",
+      requested_by: "toolgateway",
+      approver_group: "security",
+    });
+    expect(tableCount(db, "idempotency_records")).toBe(0);
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
+  });
+
+  test("ToolGateway keeps registered L4 risk when workflow metadata attempts to downgrade it", async () => {
+    const db = createMigratedDatabase();
+    seedToolDefinition(db, {
+      name: "webhook.call",
+      riskLevel: "L4",
+      requiresApproval: false,
+      idempotencyRequired: true,
+      inputSchema: { type: "object", required: ["url", "payload"] },
+    });
+    seedWorkflowDefinition(db, webhookWorkflowSteps({ risk_level: "L0" }), ["webhook.call"]);
+    const env = makeEnv(db);
+
+    const created = await createVendorTicket(env);
+
+    expect(created.status).toBe(201);
+    expect(((await created.json()) as { status: string }).status).toBe("WAITING_HUMAN");
+    expect(toolInvocationRows(db)[0]).toMatchObject({
+      tool_name: "webhook.call",
+      status: "approval_wait",
+      risk_level: "L4",
+    });
+    expect(approvalRow(db)).toMatchObject({
+      status: "pending",
+      requested_by: "toolgateway",
+    });
+    expect(tableCount(db, "idempotency_records")).toBe(0);
+    expect(tableCount(db, "workflow_steps", "step_key = 'deliver'")).toBe(0);
   });
 });
